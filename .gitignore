@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.env
+.env.local
+backend/node_modules/
+frontend/node_modules/
+backend/.env
+frontend/.env
+backend/data/
+npm-debug.log*
+
+
+# Local browser profiles (contain cookies/login data)
+.tmp-edge-pos*/
+chrome-debug-profile/

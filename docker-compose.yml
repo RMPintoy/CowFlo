@@ -1,0 +1,65 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: cowflo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: CowFlo
+      POSTGRES_USER: cowflo
+      POSTGRES_PASSWORD: cowflo_password
+    volumes:
+      - cowflo-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cowflo -d CowFlo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    container_name: cowflo-backend
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgresql://cowflo:cowflo_password@db:5432/CowFlo
+      JWT_SECRET: change-me-in-production
+      cow_flow_sign_up_pass: ${cow_flow_sign_up_pass:-admin}
+      CORS_ORIGIN: http://localhost:3000
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+    ports:
+      - "4000:4000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ""
+    container_name: cowflo-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  cowflow_pos:
+    build:
+      context: ./cowflow_pos
+      args:
+        VITE_API_BASE_URL: ""
+    container_name: cowflow-pos
+    restart: unless-stopped
+    ports:
+      - "5600:80"
+    depends_on:
+      - backend
+
+volumes:
+  cowflo-db-data:
