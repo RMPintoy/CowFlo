@@ -1,0 +1,8 @@
+# Apache (InfinityFree): serve index.html for client-side routes
+Options -Indexes
+RewriteEngine On
+RewriteBase /
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+RewriteRule ^ index.html [L]
