@@ -502,7 +502,7 @@ button:disabled {
   min-width: 0;
   min-height: 76px;
   display: grid;
-  grid-template-columns: 90px 58px minmax(0, 1fr) 100px;
+  grid-template-columns: 160px 58px minmax(0, 1fr) 100px;
   align-items: center;
   gap: 12px;
   border: 0;
@@ -571,9 +571,35 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* SKU tag ("Tires - 002"); falls back to the item number for items without a SKU. */
 .item-code {
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #050505;
+  padding: 4px 10px;
+  color: #ffffff;
+  font-size: 12px;
   font-weight: 800;
-  color: rgba(0, 0, 0, 0.62);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-meta small.category-tag {
+  background: rgba(99, 224, 80, 0.22);
+  color: #1f5d16;
+}
+
+/* The SKU column is hidden on small screens, so the SKU joins the tags there instead. */
+.item-meta small.sku-tag-mobile {
+  display: none;
+  background: #050505;
+  color: #ffffff;
+}
+
+.inventory-summary .item-meta small {
+  display: inline-flex;
 }
 
 .item-price {
@@ -796,7 +822,7 @@ button:disabled {
 }
 
 .inventory-only .item-row {
-  grid-template-columns: 90px 58px minmax(0, 1fr) 110px 42px;
+  grid-template-columns: 160px 58px minmax(0, 1fr) 110px 42px;
   gap: 12px;
   padding: 10px;
 }
@@ -933,6 +959,12 @@ button:disabled {
 .detail-name-line span {
   font-size: 20px;
   font-weight: 800;
+}
+
+.detail-name-line small {
+  color: rgba(0, 0, 0, 0.55);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .detail-stock-line,
@@ -1561,6 +1593,10 @@ button:disabled {
 
   .inventory-panel .item-code {
     display: none;
+  }
+
+  .item-meta small.sku-tag-mobile {
+    display: inline-flex;
   }
 
   .inventory-summary strong {

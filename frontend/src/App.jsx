@@ -5,11 +5,13 @@ import {
   faArrowLeft,
   faArrowRight,
   faArrowUp,
+  faBarcode,
   faBars,
   faBoxesStacked,
   faBuilding,
   faCamera,
   faChartLine,
+  faChevronDown,
   faChevronLeft,
   faChevronRight,
   faCirclePlus,
@@ -33,6 +35,7 @@ import {
   faRightFromBracket,
   faSeedling,
   faShieldHeart,
+  faTags,
   faTrashCan,
   faTriangleExclamation,
   faUpload,
@@ -383,6 +386,40 @@ function SettingsInput({ label, icon, hint, action, type = "text", ...inputProps
       {hint ? <p className="mt-1.5 text-xs text-black/45">{hint}</p> : null}
     </div>
   );
+}
+
+function SettingsSelect({ label, icon, hint, children, ...selectProps }) {
+  const selectId = useId();
+
+  return (
+    <div>
+      <label htmlFor={selectId} className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-black/45">
+        {label}
+      </label>
+      <div className="group flex h-12 items-center gap-3 rounded-xl border border-black/10 bg-white px-4 transition focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/20">
+        {icon ? (
+          <FontAwesomeIcon icon={icon} className="text-sm text-black/35 transition group-focus-within:text-brand" />
+        ) : null}
+        <select
+          id={selectId}
+          {...selectProps}
+          className="min-w-0 flex-1 border-0 bg-transparent text-sm font-medium text-black outline-none"
+        >
+          {children}
+        </select>
+      </div>
+      {hint ? <p className="mt-1.5 text-xs text-black/45">{hint}</p> : null}
+    </div>
+  );
+}
+
+// SKU numbers start at 1 and show at least three digits: 001, 002, ... 999, 1000.
+function formatSkuNumber(number) {
+  return String(number ?? "").padStart(3, "0");
+}
+
+function formatSkuLabel(item) {
+  return item?.skuName ? `${item.skuName} - ${formatSkuNumber(item.skuNumber)}` : "";
 }
 
 function ModalShell({ title, description, onClose, children, footer, size = "md" }) {
@@ -769,7 +806,7 @@ function AccountsManager({ requestApi, branches }) {
                     {[
                       ["accountSettings", "Account settings", "Change their own name, email, password, and pictures."],
                       ["manageAccounts", "Account associates", "Open this Accounts tab and change other members' access."],
-                      ["businessSettings", "Business settings", "Business name, logo, low stock level, branch names and codes."],
+                      ["businessSettings", "Business settings", "Business name, logo, low stock level, SKUs and categories, branch names and codes."],
                     ].map(([key, label, description]) => (
                       <ToggleRow
                         key={key}
@@ -809,6 +846,453 @@ function AccountsManager({ requestApi, branches }) {
           );
         })}
       </div>
+    </SettingsCard>
+  );
+}
+
+const skuGridClass = "grid min-w-[600px] grid-cols-[110px_1fr_200px]";
+// Same width and Actions column as the SKU table, so the category rows line up under it.
+const categoryGridClass = "grid min-w-[600px] grid-cols-[1fr_200px]";
+const skuInputClass =
+  "h-10 w-full min-w-0 rounded-xl border border-black/10 bg-white px-3 text-sm font-medium text-black outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20";
+const skuActionClass =
+  "inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition disabled:opacity-40";
+
+function SkuManager({ requestApi, branches }) {
+  const [skus, setSkus] = useState(null);
+  const [message, setMessage] = useState("");
+  const [skuDraft, setSkuDraft] = useState(null);
+  const [expandedSkuIds, setExpandedSkuIds] = useState([]);
+  const [addingCategorySkuId, setAddingCategorySkuId] = useState(null);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [categoryDraft, setCategoryDraft] = useState(null);
+  const [busy, setBusy] = useState(null);
+
+  useEffect(() => {
+    requestApi("/skus")
+      .then((payload) => setSkus(payload.skus))
+      .catch((error) => setMessage(error.message));
+  }, []);
+
+  function replaceSku(sku) {
+    setSkus((current) => current.map((item) => (item.id === sku.id ? sku : item)));
+  }
+
+  function startAddSku() {
+    setSkuDraft({ id: null, sku: "", branchId: "" });
+  }
+
+  function startEditSku(sku) {
+    setSkuDraft({ id: sku.id, sku: sku.sku, branchId: sku.branchId ? String(sku.branchId) : "" });
+  }
+
+  // The chevron shows/hides the list. The + in the category header opens the new-category row.
+  function toggleCategories(sku) {
+    setExpandedSkuIds((current) =>
+      current.includes(sku.id) ? current.filter((id) => id !== sku.id) : [...current, sku.id],
+    );
+    setCategoryDraft(null);
+  }
+
+  function startAddCategory(sku) {
+    setAddingCategorySkuId(sku.id);
+    setNewCategoryName("");
+    setExpandedSkuIds((current) => (current.includes(sku.id) ? current : [...current, sku.id]));
+  }
+
+  async function handleSkuSave(event) {
+    event.preventDefault();
+
+    const isNew = skuDraft.id === null;
+
+    setBusy("sku");
+
+    try {
+      const payload = await requestApi(isNew ? "/skus" : `/skus/${skuDraft.id}`, {
+        method: isNew ? "POST" : "PATCH",
+        body: JSON.stringify({ sku: skuDraft.sku.trim(), branchId: skuDraft.branchId ? Number(skuDraft.branchId) : null }),
+      });
+
+      setSkus((current) => (isNew ? [...current, payload.sku] : current.map((item) => (item.id === payload.sku.id ? payload.sku : item))));
+      setSkuDraft(null);
+    } catch (error) {
+      await Swal.fire(isNew ? "Unable to add SKU" : "Unable to save SKU", error.message, "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleSkuDelete(sku) {
+    const confirmation = await Swal.fire({
+      title: "Delete SKU?",
+      html: `This removes <b>${escapeHtml(`${sku.sku} - ${formatSkuNumber(sku.skuNumber)}`)}</b> and its ${sku.categories.length} ${
+        sku.categories.length === 1 ? "category" : "categories"
+      }. Inventory items using it will have an empty SKU and category until you pick new ones.<br><br>Its number is not reused.`,
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "Delete SKU",
+      confirmButtonColor: "#dc2626",
+    });
+
+    if (!confirmation.isConfirmed) {
+      return;
+    }
+
+    setBusy(`delete-sku-${sku.id}`);
+
+    try {
+      await requestApi(`/skus/${sku.id}`, { method: "DELETE" });
+      setSkus((current) => current.filter((item) => item.id !== sku.id));
+      setExpandedSkuIds((current) => current.filter((id) => id !== sku.id));
+      setAddingCategorySkuId((current) => (current === sku.id ? null : current));
+    } catch (error) {
+      await Swal.fire("Unable to delete SKU", error.message, "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleCategoryAdd(event, sku) {
+    event.preventDefault();
+    setBusy("category-add");
+
+    try {
+      const payload = await requestApi(`/skus/${sku.id}/categories`, {
+        method: "POST",
+        body: JSON.stringify({ categoryName: newCategoryName.trim() }),
+      });
+
+      replaceSku(payload.sku);
+      setNewCategoryName("");
+      setAddingCategorySkuId(null);
+    } catch (error) {
+      await Swal.fire("Unable to add category", error.message, "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleCategorySave(event, sku) {
+    event.preventDefault();
+    setBusy("category-edit");
+
+    try {
+      const payload = await requestApi(`/skus/${sku.id}/categories/${categoryDraft.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ categoryName: categoryDraft.categoryName.trim() }),
+      });
+
+      replaceSku(payload.sku);
+      setCategoryDraft(null);
+    } catch (error) {
+      await Swal.fire("Unable to save category", error.message, "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleCategoryDelete(sku, category) {
+    const confirmation = await Swal.fire({
+      title: "Delete category?",
+      html: `This removes <b>${escapeHtml(category.categoryName)}</b> from ${escapeHtml(sku.sku)}. Inventory items using it keep their SKU but will have an empty category until you pick a new one.`,
+      icon: "warning",
+      showCancelButton: true,
+      confirmButtonText: "Delete category",
+      confirmButtonColor: "#dc2626",
+    });
+
+    if (!confirmation.isConfirmed) {
+      return;
+    }
+
+    setBusy(`delete-category-${category.id}`);
+
+    try {
+      const payload = await requestApi(`/skus/${sku.id}/categories/${category.id}`, { method: "DELETE" });
+
+      replaceSku(payload.sku);
+    } catch (error) {
+      await Swal.fire("Unable to delete category", error.message, "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function renderSkuForm() {
+    return (
+      <form onSubmit={handleSkuSave} className={`${skuGridClass} items-center gap-3 bg-brand/10 px-4 py-3 text-sm`}>
+        <p className="font-semibold text-black/45">
+          {skuDraft.id === null ? "New" : formatSkuNumber(skus.find((sku) => sku.id === skuDraft.id)?.skuNumber)}
+        </p>
+        <div className="flex min-w-0 gap-2">
+          <input
+            value={skuDraft.sku}
+            onChange={(event) => setSkuDraft((current) => ({ ...current, sku: event.target.value }))}
+            placeholder="SKU name"
+            maxLength={120}
+            aria-label="SKU name"
+            autoFocus
+            required
+            className={skuInputClass}
+          />
+          <select
+            value={skuDraft.branchId}
+            onChange={(event) => setSkuDraft((current) => ({ ...current, branchId: event.target.value }))}
+            aria-label="Branch"
+            className={`${skuInputClass} max-w-[170px]`}
+          >
+            <option value="">All branches</option>
+            {branches.map((branch) => (
+              <option key={branch.id} value={branch.id}>
+                {branch.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="submit"
+            disabled={busy === "sku" || !skuDraft.sku.trim()}
+            className={`${skuActionClass} border-black bg-black text-white hover:bg-black/85`}
+          >
+            <FontAwesomeIcon icon={faCircleCheck} />
+            {busy === "sku" ? "Saving..." : "Save"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSkuDraft(null)}
+            className={`${skuActionClass} border-black/10 text-black/60 hover:bg-black/5 hover:text-black`}
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    );
+  }
+
+  function renderCategoryAddRow(sku) {
+    return (
+      <form
+        onSubmit={(event) => handleCategoryAdd(event, sku)}
+        className={`${categoryGridClass} items-center gap-3 border-t border-brand/30 bg-brand/[0.06] px-4 py-3`}
+      >
+        <input
+          value={newCategoryName}
+          onChange={(event) => setNewCategoryName(event.target.value)}
+          placeholder={`New category for ${sku.sku}`}
+          maxLength={120}
+          aria-label="New category name"
+          autoFocus
+          required
+          className={skuInputClass}
+        />
+        <div className="flex gap-2">
+          <button
+            type="submit"
+            disabled={busy === "category-add" || !newCategoryName.trim()}
+            className={`${skuActionClass} border-black bg-black text-white hover:bg-black/85`}
+          >
+            <FontAwesomeIcon icon={faCircleCheck} />
+            {busy === "category-add" ? "Saving..." : "Save"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setAddingCategorySkuId(null)}
+            className={`${skuActionClass} border-black/10 text-black/60 hover:bg-black/5 hover:text-black`}
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    );
+  }
+
+  function renderCategories(sku) {
+    return (
+      <div className="bg-brand/[0.06]">
+        <div className={`${categoryGridClass} gap-3 border-t border-brand/30 bg-brand/20 px-4 py-3 text-xs font-semibold uppercase text-black/60`}>
+          <span>{sku.sku} categories</span>
+          <span className="flex items-center gap-2">
+            Actions
+            <button
+              type="button"
+              onClick={() => startAddCategory(sku)}
+              disabled={addingCategorySkuId === sku.id}
+              aria-label={`Add category to ${sku.sku}`}
+              title="Add category"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-black text-white transition hover:bg-black/80 disabled:opacity-40"
+            >
+              <FontAwesomeIcon icon={faPlus} className="text-[10px]" />
+            </button>
+          </span>
+        </div>
+
+        {addingCategorySkuId === sku.id ? renderCategoryAddRow(sku) : null}
+
+        {sku.categories.length === 0 ? (
+          <p className="border-t border-brand/30 px-4 py-3 text-sm text-black/45">No categories yet.</p>
+        ) : null}
+
+        {sku.categories.map((category) =>
+          categoryDraft?.id === category.id ? (
+            <form
+              key={category.id}
+              onSubmit={(event) => handleCategorySave(event, sku)}
+              className={`${categoryGridClass} items-center gap-3 border-t border-brand/30 px-4 py-3`}
+            >
+              <input
+                value={categoryDraft.categoryName}
+                onChange={(event) => setCategoryDraft((current) => ({ ...current, categoryName: event.target.value }))}
+                maxLength={120}
+                aria-label="Category name"
+                autoFocus
+                required
+                className={skuInputClass}
+              />
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  disabled={busy === "category-edit" || !categoryDraft.categoryName.trim()}
+                  className={`${skuActionClass} border-black bg-black text-white hover:bg-black/85`}
+                >
+                  <FontAwesomeIcon icon={faCircleCheck} />
+                  {busy === "category-edit" ? "Saving..." : "Save"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCategoryDraft(null)}
+                  className={`${skuActionClass} border-black/10 text-black/60 hover:bg-black/5 hover:text-black`}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div
+              key={category.id}
+              className={`${categoryGridClass} items-center gap-3 border-t border-brand/30 px-4 py-3 text-sm`}
+            >
+              <p className="truncate font-medium text-black">{category.categoryName}</p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCategoryDraft({ id: category.id, categoryName: category.categoryName })}
+                  className={`${skuActionClass} border-black/10 text-black hover:bg-black/5`}
+                >
+                  <FontAwesomeIcon icon={faPen} />
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleCategoryDelete(sku, category)}
+                  disabled={busy === `delete-category-${category.id}`}
+                  className={`${skuActionClass} border-red-200 text-red-600 hover:bg-red-50`}
+                >
+                  <FontAwesomeIcon icon={faTrashCan} />
+                  Delete
+                </button>
+              </div>
+            </div>
+          ),
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <SettingsCard
+      icon={faBarcode}
+      title="SKUs"
+      description="Group inventory by SKU and category. Numbers count up per business and are never reused."
+    >
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-black/50">
+          {skus?.length ? "Every inventory item must use one of these SKUs." : "Once you add a SKU, every inventory item must use one."}
+        </p>
+        <button
+          type="button"
+          onClick={startAddSku}
+          disabled={!skus || skuDraft?.id === null}
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-brand px-4 text-sm font-semibold text-black transition hover:brightness-95 disabled:opacity-50"
+        >
+          <FontAwesomeIcon icon={faPlus} />
+          Add SKU
+        </button>
+      </div>
+
+      {message ? <p className="text-sm text-red-600">{message}</p> : null}
+      {!skus && !message ? <p className="text-sm text-black/45">Loading SKUs...</p> : null}
+
+      {skus ? (
+        <div className="overflow-x-auto rounded-2xl border border-black/8">
+          <div className={`${skuGridClass} gap-3 bg-black px-4 py-3 text-xs font-semibold uppercase text-white/65`}>
+            <span>SKU number</span>
+            <span>SKU name</span>
+            <span>Actions</span>
+          </div>
+
+          {skuDraft?.id === null ? renderSkuForm() : null}
+
+          {skus.length === 0 && skuDraft?.id !== null ? (
+            <p className="px-4 py-8 text-center text-sm text-black/50">No SKUs yet. Click Add SKU to create the first one.</p>
+          ) : null}
+
+          {skus.map((sku) => (
+            <div key={sku.id} className="border-t border-black/8 first:border-t-0">
+              {skuDraft?.id === sku.id ? (
+                renderSkuForm()
+              ) : (
+                <div className={`${skuGridClass} items-center gap-3 px-4 py-3 text-sm`}>
+                  <p className="font-semibold text-black/70">{formatSkuNumber(sku.skuNumber)}</p>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => toggleCategories(sku)}
+                      aria-expanded={expandedSkuIds.includes(sku.id)}
+                      aria-label={`${expandedSkuIds.includes(sku.id) ? "Hide" : "Show"} ${sku.sku} categories`}
+                      title={expandedSkuIds.includes(sku.id) ? "Hide categories" : "Show categories"}
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-black/50 transition hover:bg-brand/15 hover:text-black"
+                    >
+                      <FontAwesomeIcon
+                        icon={faChevronDown}
+                        className={`text-xs transition-transform ${expandedSkuIds.includes(sku.id) ? "" : "rotate-180"}`}
+                      />
+                    </button>
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold text-black">{sku.sku}</p>
+                      <p className="truncate text-xs text-black/45">
+                        {sku.branchName || "All branches"} · {sku.categories.length}{" "}
+                        {sku.categories.length === 1 ? "category" : "categories"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => startEditSku(sku)}
+                      className={`${skuActionClass} border-black/10 text-black hover:bg-black/5`}
+                    >
+                      <FontAwesomeIcon icon={faPen} />
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSkuDelete(sku)}
+                      disabled={busy === `delete-sku-${sku.id}`}
+                      className={`${skuActionClass} border-red-200 text-red-600 hover:bg-red-50`}
+                    >
+                      <FontAwesomeIcon icon={faTrashCan} />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {expandedSkuIds.includes(sku.id) ? renderCategories(sku) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </SettingsCard>
   );
 }
@@ -1329,12 +1813,16 @@ function ModalActions({ onCancel, busy, submitLabel, submitIcon = faCircleCheck,
   );
 }
 
-function InventoryItemModal({ mode, item, branches, canDelete, onClose, onSave, onDelete }) {
+function InventoryItemModal({ mode, item, branches, skus, canDelete, onClose, onSave, onDelete }) {
   const [form, setForm] = useState(() => ({
     name: item?.name || "",
     price: item ? String(item.price ?? 0) : "",
     stocks: "",
+    skuId: item?.skuId ? String(item.skuId) : "",
+    categoryId: item?.categoryId ? String(item.categoryId) : "",
   }));
+  const selectedSku = skus.find((sku) => String(sku.id) === form.skuId) || null;
+  const skuCategories = selectedSku?.categories || [];
   const [allocations, setAllocations] = useState({});
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(item?.imageData || "");
@@ -1398,7 +1886,22 @@ function InventoryItemModal({ mode, item, branches, canDelete, onClose, onSave, 
       return;
     }
 
-    const values = { name, price };
+    if (skus.length > 0 && !selectedSku) {
+      setError("Select a SKU for this item.");
+      return;
+    }
+
+    if (skuCategories.length > 0 && !form.categoryId) {
+      setError("Select a category for this SKU.");
+      return;
+    }
+
+    const values = {
+      name,
+      price,
+      skuId: selectedSku ? selectedSku.id : null,
+      categoryId: skuCategories.length > 0 ? Number(form.categoryId) : null,
+    };
 
     if (isAdd) {
       const branchAllocations = getAllocationList(allocations);
@@ -1454,6 +1957,45 @@ function InventoryItemModal({ mode, item, branches, canDelete, onClose, onSave, 
           autoFocus
           required
         />
+        {skus.length > 0 ? (
+          <div className={`grid gap-4 ${skuCategories.length > 0 ? "sm:grid-cols-2" : ""}`}>
+            <SettingsSelect
+              label="SKU"
+              icon={faBarcode}
+              value={form.skuId}
+              onChange={(event) => setForm((current) => ({ ...current, skuId: event.target.value, categoryId: "" }))}
+              required
+            >
+              <option value="" disabled>
+                Select a SKU
+              </option>
+              {skus.map((sku) => (
+                <option key={sku.id} value={sku.id}>
+                  {sku.sku} - {formatSkuNumber(sku.skuNumber)}
+                  {sku.branchName ? ` (${sku.branchName})` : ""}
+                </option>
+              ))}
+            </SettingsSelect>
+            {skuCategories.length > 0 ? (
+              <SettingsSelect
+                label="Category"
+                icon={faTags}
+                value={form.categoryId}
+                onChange={(event) => setForm((current) => ({ ...current, categoryId: event.target.value }))}
+                required
+              >
+                <option value="" disabled>
+                  Select a category
+                </option>
+                {skuCategories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.categoryName}
+                  </option>
+                ))}
+              </SettingsSelect>
+            ) : null}
+          </div>
+        ) : null}
         <div className={`grid gap-4 ${isAdd ? "sm:grid-cols-2" : ""}`}>
           <SettingsInput
             label="Price"
@@ -2193,6 +2735,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
   const [inventoryItems, setInventoryItems] = useState([]);
   const [inventoryLoading, setInventoryLoading] = useState(false);
   const [inventoryMessage, setInventoryMessage] = useState("");
+  const [skus, setSkus] = useState([]);
   const [branchInventoryItems, setBranchInventoryItems] = useState([]);
   const [branchInventoryLoading, setBranchInventoryLoading] = useState(false);
   const [branchInventoryMessage, setBranchInventoryMessage] = useState("");
@@ -2210,8 +2753,8 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
   const inventoryPageSize = 10;
   const showInventoryBranchColumn = inventoryFilter === "all";
   const inventoryGridClass = showInventoryBranchColumn
-    ? "grid min-w-[1100px] grid-cols-[72px_90px_1.2fr_110px_120px_1.4fr_132px]"
-    : "grid min-w-[760px] grid-cols-[72px_90px_1.6fr_110px_120px_132px]";
+    ? "grid min-w-[1380px] grid-cols-[72px_90px_1.2fr_160px_140px_110px_120px_1.3fr_132px]"
+    : "grid min-w-[1060px] grid-cols-[72px_90px_1.5fr_160px_140px_110px_120px_132px]";
   const sortedInventoryItems = [...inventoryItems].sort((a, b) =>
     a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }),
   );
@@ -2640,6 +3183,15 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
       loadInventory();
     }
   }, [activeSection, inventoryFilter, inventorySearch]);
+
+  // SKUs feed the inventory item form; Settings > Business manages them.
+  useEffect(() => {
+    if (activeSection === "Inventory") {
+      requestBranchApi("/skus")
+        .then((payload) => setSkus(payload.skus))
+        .catch((error) => setInventoryMessage(error.message));
+    }
+  }, [activeSection]);
 
   async function loadBranchInventory(branchId) {
     setBranchInventoryLoading(true);
@@ -3625,7 +4177,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                 </label>
 
                 <label className="grid min-w-0 gap-2 text-sm font-semibold text-black sm:max-w-sm sm:flex-1">
-                  Search item or ID
+                  Search item, ID, SKU or category
                   <span className="relative block">
                     <FontAwesomeIcon
                       icon={faMagnifyingGlass}
@@ -3635,7 +4187,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                       type="search"
                       value={inventorySearch}
                       onChange={(event) => setInventorySearch(event.target.value)}
-                      placeholder="Item name or ID"
+                      placeholder="Item, ID, SKU or category"
                       className="h-11 w-full rounded-xl border border-black/10 bg-white pl-10 pr-3 text-sm font-medium text-black outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                     />
                   </span>
@@ -3660,6 +4212,8 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                 <span>ID</span>
                 <span>Image</span>
                 <span>Item name</span>
+                <span>SKU</span>
+                <span>Category</span>
                 <span>Stocks</span>
                 <span>Price</span>
                 {showInventoryBranchColumn ? <span>Branches</span> : null}
@@ -3716,6 +4270,12 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                         </button>
                       )}
                       <p className="truncate font-semibold text-black">{item.name}</p>
+                      <p className="truncate text-black/70" title={formatSkuLabel(item)}>
+                        {formatSkuLabel(item) || "-"}
+                      </p>
+                      <p className="truncate text-black/70" title={item.categoryName || ""}>
+                        {item.categoryName || "-"}
+                      </p>
                       <p className={stockTone.text}>{getInventoryDisplayStocks(item)}</p>
                       <p className="font-medium text-black/70">{formatMoney(item.price)}</p>
                       {showInventoryBranchColumn ? (
@@ -4223,10 +4783,12 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                   ) : null}
 
                   <div className="overflow-x-auto rounded-2xl border border-black/8">
-                    <div className="grid min-w-[1020px] grid-cols-[80px_90px_1.3fr_1.2fr_120px_120px_180px] gap-3 bg-black px-4 py-3 text-xs font-semibold uppercase text-white/65">
+                    <div className="grid min-w-[1320px] grid-cols-[80px_90px_1.3fr_160px_140px_1.1fr_120px_120px_180px] gap-3 bg-black px-4 py-3 text-xs font-semibold uppercase text-white/65">
                       <span>ID</span>
                       <span>Image</span>
                       <span>Item name</span>
+                      <span>SKU</span>
+                      <span>Category</span>
                       <span>Branch name</span>
                       <span>Stock</span>
                       <span>Price</span>
@@ -4259,7 +4821,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                           return (
                             <article
                               key={item.id}
-                              className={`grid min-w-[1020px] grid-cols-[80px_90px_1.3fr_1.2fr_120px_120px_180px] items-center gap-3 px-4 py-4 text-sm transition ${
+                              className={`grid min-w-[1320px] grid-cols-[80px_90px_1.3fr_160px_140px_1.1fr_120px_120px_180px] items-center gap-3 px-4 py-4 text-sm transition ${
                                 getStockRowTone(branchStock, inventoryLowStockThreshold).row
                               } ${index > 0 ? "border-t border-black/8" : ""}`}
                             >
@@ -4287,6 +4849,12 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                                 </button>
                               )}
                               <p className="truncate font-semibold text-black">{item.name}</p>
+                              <p className="truncate text-black/70" title={formatSkuLabel(item)}>
+                                {formatSkuLabel(item) || "-"}
+                              </p>
+                              <p className="truncate text-black/70" title={item.categoryName || ""}>
+                                {item.categoryName || "-"}
+                              </p>
                               <p className="truncate text-black/70">{selectedBranch.name}</p>
                               <p>
                                 {branchStock <= inventoryLowStockThreshold ? (
@@ -4765,6 +5333,8 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                   </SettingsCard>
                 </form>
 
+                <SkuManager requestApi={requestBranchApi} branches={branches} />
+
                 <SettingsCard
                   icon={faShieldHeart}
                   title="Admin settings"
@@ -4896,6 +5466,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
           mode={inventoryModal.type}
           item={inventoryModal.item}
           branches={branches}
+          skus={skus}
           canDelete={inventoryFilter === "all"}
           onClose={() => setInventoryModal(null)}
           onSave={saveInventoryItem}

@@ -253,10 +253,129 @@ function serializeInventoryItem(item) {
     imageData: item.image_data,
     imageMime: item.image_mime,
     imageName: item.image_name,
+    skuId: item.sku_id ?? null,
+    skuName: item.sku_name ?? null,
+    skuNumber: item.sku_number ?? null,
+    categoryId: item.category_id ?? null,
+    categoryName: item.category_name ?? null,
     branches: item.branches || [],
     createdAt: item.created_at,
     updatedAt: item.updated_at,
   };
+}
+
+function serializeSku(sku) {
+  return {
+    id: sku.id,
+    sku: sku.sku,
+    skuNumber: sku.sku_number,
+    branchId: sku.branch_id,
+    branchName: sku.branch_name ?? null,
+    businessId: sku.business_id,
+    categories: (sku.categories || []).map((category) => ({
+      id: category.id,
+      categoryName: category.category_name,
+      skuId: category.sku_id,
+    })),
+    createdAt: sku.created_at,
+    updatedAt: sku.updated_at,
+  };
+}
+
+const skuSelect = `
+  SELECT
+    inventory_skus.id,
+    inventory_skus.sku,
+    inventory_skus.sku_number,
+    inventory_skus.branch_id,
+    branches.name AS branch_name,
+    inventory_skus.business_id,
+    inventory_skus.created_at,
+    inventory_skus.updated_at,
+    COALESCE(
+      JSON_AGG(
+        JSON_BUILD_OBJECT(
+          'id', inventory_categories.id,
+          'category_name', inventory_categories.category_name,
+          'sku_id', inventory_categories.sku_id
+        )
+        ORDER BY LOWER(inventory_categories.category_name) ASC, inventory_categories.id ASC
+      ) FILTER (WHERE inventory_categories.id IS NOT NULL),
+      '[]'
+    ) AS categories
+  FROM inventory_skus
+  LEFT JOIN branches ON branches.id = inventory_skus.branch_id
+  LEFT JOIN inventory_categories ON inventory_categories.sku_id = inventory_skus.id
+`;
+
+async function findSku(businessId, skuId) {
+  const result = await pool.query(
+    `${skuSelect} WHERE inventory_skus.id = $1 AND inventory_skus.business_id = $2 GROUP BY inventory_skus.id, branches.name`,
+    [skuId, businessId],
+  );
+
+  return result.rows[0] ? serializeSku(result.rows[0]) : null;
+}
+
+function parseOptionalId(value) {
+  if (value === null || value === undefined || value === "") {
+    return { ok: true, value: null };
+  }
+
+  const id = Number(value);
+
+  return Number.isInteger(id) && id > 0 ? { ok: true, value: id } : { ok: false };
+}
+
+// Checks that the SKU belongs to the business and the category belongs to that SKU.
+// A SKU is required once the business has any, and a category once the chosen SKU has any.
+async function resolveItemSkuCategory(client, businessId, rawSkuId, rawCategoryId) {
+  const skuId = parseOptionalId(rawSkuId);
+  const categoryId = parseOptionalId(rawCategoryId);
+
+  if (!skuId.ok || !categoryId.ok) {
+    return { error: "Select a valid SKU and category." };
+  }
+
+  if (categoryId.value && !skuId.value) {
+    return { error: "Select a SKU before choosing a category." };
+  }
+
+  if (!skuId.value) {
+    const anySkuResult = await client.query("SELECT 1 FROM inventory_skus WHERE business_id = $1 LIMIT 1", [businessId]);
+
+    return anySkuResult.rowCount > 0 ? { error: "Select a SKU for this item." } : { skuId: null, categoryId: null };
+  }
+
+  const skuResult = await client.query(
+    `
+      SELECT EXISTS (SELECT 1 FROM inventory_categories WHERE sku_id = inventory_skus.id) AS has_categories
+      FROM inventory_skus
+      WHERE id = $1 AND business_id = $2
+    `,
+    [skuId.value, businessId],
+  );
+
+  if (skuResult.rowCount === 0) {
+    return { error: "That SKU no longer exists. Pick another one." };
+  }
+
+  if (skuResult.rows[0].has_categories && !categoryId.value) {
+    return { error: "Select a category for this SKU." };
+  }
+
+  if (categoryId.value) {
+    const categoryResult = await client.query("SELECT 1 FROM inventory_categories WHERE id = $1 AND sku_id = $2", [
+      categoryId.value,
+      skuId.value,
+    ]);
+
+    if (categoryResult.rowCount === 0) {
+      return { error: "That category does not belong to the selected SKU." };
+    }
+  }
+
+  return { skuId: skuId.value, categoryId: categoryId.value };
 }
 
 function serializeInventoryHistoryEntry(entry) {
@@ -307,6 +426,9 @@ function serializePosItem(item) {
     imageData: item.image_data,
     stockLeft: Number(item.stock_left || 0),
     price: Number(item.price || 0),
+    skuName: item.sku_name ?? null,
+    skuNumber: item.sku_number ?? null,
+    categoryName: item.category_name ?? null,
   };
 }
 
@@ -1602,7 +1724,306 @@ app.delete("/api/branches/:id", authenticate, requireAccess((a) => a.permissions
   }
 });
 
-app.get("/api/inventory", authenticate, requireAccess((a, req) => (a.permissions.sections.inventory || a.permissions.sections.branches) && (!req.query.branchId || req.query.branchId === "all" || canAccessBranch(a, req.query.branchId))), async (req, res) => {
+function validateSkuName(value) {
+  const sku = String(value ?? "").trim();
+
+  if (!sku) {
+    return { error: "SKU name is required." };
+  }
+
+  if (sku.length > 120) {
+    return { error: "SKU name must be 120 characters or fewer." };
+  }
+
+  return { value: sku };
+}
+
+function validateCategoryName(value) {
+  const categoryName = String(value ?? "").trim();
+
+  if (!categoryName) {
+    return { error: "Category name is required." };
+  }
+
+  if (categoryName.length > 120) {
+    return { error: "Category name must be 120 characters or fewer." };
+  }
+
+  return { value: categoryName };
+}
+
+async function resolveSkuBranchId(businessId, rawBranchId) {
+  const branchId = parseOptionalId(rawBranchId);
+
+  if (!branchId.ok) {
+    return { error: "Select a valid branch." };
+  }
+
+  if (branchId.value) {
+    const result = await pool.query("SELECT 1 FROM branches WHERE id = $1 AND business_id = $2", [
+      branchId.value,
+      businessId,
+    ]);
+
+    if (result.rowCount === 0) {
+      return { error: "Select a valid branch for this business." };
+    }
+  }
+
+  return { value: branchId.value };
+}
+
+const isUniqueViolation = (error) => error?.code === "23505";
+
+app.get("/api/skus", authenticate, requireAccess((a) => a.permissions.sections.inventory || a.permissions.businessSettings), async (req, res) => {
+  try {
+    const businessId = await getCurrentBusinessId(req.user.sub);
+    const result = await pool.query(
+      `${skuSelect} WHERE inventory_skus.business_id = $1 GROUP BY inventory_skus.id, branches.name ORDER BY inventory_skus.sku_number ASC`,
+      [businessId],
+    );
+
+    return res.json({ skus: result.rows.map(serializeSku) });
+  } catch (error) {
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to load SKUs." });
+  }
+});
+
+app.post("/api/skus", authenticate, requireAccess((a) => a.permissions.businessSettings), async (req, res) => {
+  const sku = validateSkuName(req.body.sku);
+
+  if (sku.error) {
+    return res.status(400).json({ message: sku.error });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    const businessId = await getCurrentBusinessId(req.user.sub, client);
+    const branchId = await resolveSkuBranchId(businessId, req.body.branchId);
+
+    if (branchId.error) {
+      return res.status(400).json({ message: branchId.error });
+    }
+
+    await client.query("BEGIN");
+    // Row lock on the business keeps two SKUs added at once from getting the same number.
+    const counterResult = await client.query(
+      "UPDATE businesses SET last_sku_number = last_sku_number + 1 WHERE id = $1 RETURNING last_sku_number",
+      [businessId],
+    );
+    const insertResult = await client.query(
+      `
+        INSERT INTO inventory_skus (sku, sku_number, branch_id, business_id)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+      `,
+      [sku.value, counterResult.rows[0].last_sku_number, branchId.value, businessId],
+    );
+    await client.query("COMMIT");
+
+    return res.status(201).json({ sku: await findSku(businessId, insertResult.rows[0].id) });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+
+    if (isUniqueViolation(error)) {
+      return res.status(409).json({ message: "A SKU with that name already exists." });
+    }
+
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to add SKU." });
+  } finally {
+    client.release();
+  }
+});
+
+app.patch("/api/skus/:id", authenticate, requireAccess((a) => a.permissions.businessSettings), async (req, res) => {
+  const skuId = parseOptionalId(req.params.id);
+  const sku = validateSkuName(req.body.sku);
+
+  if (!skuId.ok || !skuId.value) {
+    return res.status(400).json({ message: "Select a valid SKU." });
+  }
+
+  if (sku.error) {
+    return res.status(400).json({ message: sku.error });
+  }
+
+  try {
+    const businessId = await getCurrentBusinessId(req.user.sub);
+    const branchId = await resolveSkuBranchId(businessId, req.body.branchId);
+
+    if (branchId.error) {
+      return res.status(400).json({ message: branchId.error });
+    }
+
+    const result = await pool.query(
+      `
+        UPDATE inventory_skus
+        SET sku = $1, branch_id = $2, updated_at = NOW()
+        WHERE id = $3 AND business_id = $4
+        RETURNING id
+      `,
+      [sku.value, branchId.value, skuId.value, businessId],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "SKU not found." });
+    }
+
+    return res.json({ sku: await findSku(businessId, skuId.value) });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return res.status(409).json({ message: "A SKU with that name already exists." });
+    }
+
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to update SKU." });
+  }
+});
+
+app.delete("/api/skus/:id", authenticate, requireAccess((a) => a.permissions.businessSettings), async (req, res) => {
+  const skuId = parseOptionalId(req.params.id);
+
+  if (!skuId.ok || !skuId.value) {
+    return res.status(400).json({ message: "Select a valid SKU." });
+  }
+
+  try {
+    const businessId = await getCurrentBusinessId(req.user.sub);
+    // Categories are removed with the SKU; items using either keep existing without a SKU/category.
+    const result = await pool.query("DELETE FROM inventory_skus WHERE id = $1 AND business_id = $2", [
+      skuId.value,
+      businessId,
+    ]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "SKU not found." });
+    }
+
+    return res.json({ message: "SKU removed." });
+  } catch (error) {
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to remove SKU." });
+  }
+});
+
+app.post("/api/skus/:id/categories", authenticate, requireAccess((a) => a.permissions.businessSettings), async (req, res) => {
+  const skuId = parseOptionalId(req.params.id);
+  const categoryName = validateCategoryName(req.body.categoryName);
+
+  if (!skuId.ok || !skuId.value) {
+    return res.status(400).json({ message: "Select a valid SKU." });
+  }
+
+  if (categoryName.error) {
+    return res.status(400).json({ message: categoryName.error });
+  }
+
+  try {
+    const businessId = await getCurrentBusinessId(req.user.sub);
+    const result = await pool.query(
+      `
+        INSERT INTO inventory_categories (category_name, sku_id)
+        SELECT $1, id FROM inventory_skus WHERE id = $2 AND business_id = $3
+        RETURNING id
+      `,
+      [categoryName.value, skuId.value, businessId],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "SKU not found." });
+    }
+
+    return res.status(201).json({ sku: await findSku(businessId, skuId.value) });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return res.status(409).json({ message: "This SKU already has a category with that name." });
+    }
+
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to add category." });
+  }
+});
+
+app.patch("/api/skus/:skuId/categories/:id", authenticate, requireAccess((a) => a.permissions.businessSettings), async (req, res) => {
+  const skuId = parseOptionalId(req.params.skuId);
+  const categoryId = parseOptionalId(req.params.id);
+  const categoryName = validateCategoryName(req.body.categoryName);
+
+  if (!skuId.ok || !skuId.value || !categoryId.ok || !categoryId.value) {
+    return res.status(400).json({ message: "Select a valid category." });
+  }
+
+  if (categoryName.error) {
+    return res.status(400).json({ message: categoryName.error });
+  }
+
+  try {
+    const businessId = await getCurrentBusinessId(req.user.sub);
+    const result = await pool.query(
+      `
+        UPDATE inventory_categories
+        SET category_name = $1, updated_at = NOW()
+        FROM inventory_skus
+        WHERE inventory_categories.id = $2
+          AND inventory_categories.sku_id = $3
+          AND inventory_skus.id = inventory_categories.sku_id
+          AND inventory_skus.business_id = $4
+      `,
+      [categoryName.value, categoryId.value, skuId.value, businessId],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Category not found." });
+    }
+
+    return res.json({ sku: await findSku(businessId, skuId.value) });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return res.status(409).json({ message: "This SKU already has a category with that name." });
+    }
+
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to update category." });
+  }
+});
+
+app.delete("/api/skus/:skuId/categories/:id", authenticate, requireAccess((a) => a.permissions.businessSettings), async (req, res) => {
+  const skuId = parseOptionalId(req.params.skuId);
+  const categoryId = parseOptionalId(req.params.id);
+
+  if (!skuId.ok || !skuId.value || !categoryId.ok || !categoryId.value) {
+    return res.status(400).json({ message: "Select a valid category." });
+  }
+
+  try {
+    const businessId = await getCurrentBusinessId(req.user.sub);
+    const result = await pool.query(
+      `
+        DELETE FROM inventory_categories
+        USING inventory_skus
+        WHERE inventory_categories.id = $1
+          AND inventory_categories.sku_id = $2
+          AND inventory_skus.id = inventory_categories.sku_id
+          AND inventory_skus.business_id = $3
+      `,
+      [categoryId.value, skuId.value, businessId],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Category not found." });
+    }
+
+    return res.json({ sku: await findSku(businessId, skuId.value) });
+  } catch (error) {
+    console.error(error);
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to remove category." });
+  }
+});
+
+app.get("/api/inventory", authenticate,requireAccess((a, req) => (a.permissions.sections.inventory || a.permissions.sections.branches) && (!req.query.branchId || req.query.branchId === "all" || canAccessBranch(a, req.query.branchId))), async (req, res) => {
   try {
     const businessId = await getCurrentBusinessId(req.user.sub);
     const branchId = req.query.branchId;
@@ -1652,6 +2073,8 @@ app.get("/api/inventory", authenticate, requireAccess((a, req) => (a.permissions
         AND (
           inventory_items.name ILIKE $${searchParamIndex}
           OR CAST(inventory_items.id AS TEXT) ILIKE $${searchParamIndex}
+          OR inventory_skus.sku ILIKE $${searchParamIndex}
+          OR inventory_categories.category_name ILIKE $${searchParamIndex}
         )
       `;
     }
@@ -1669,6 +2092,11 @@ app.get("/api/inventory", authenticate, requireAccess((a, req) => (a.permissions
           inventory_items.image_data,
           inventory_items.image_mime,
           inventory_items.image_name,
+          inventory_items.sku_id,
+          inventory_skus.sku AS sku_name,
+          inventory_skus.sku_number,
+          inventory_items.category_id,
+          inventory_categories.category_name,
           inventory_items.created_at,
           inventory_items.updated_at,
           COALESCE(
@@ -1687,10 +2115,12 @@ app.get("/api/inventory", authenticate, requireAccess((a, req) => (a.permissions
           ON inventory_item_branches.inventory_item_id = inventory_items.id
           ${inventoryBranchJoinFilter}
         LEFT JOIN branches ON branches.id = inventory_item_branches.branch_id
+        LEFT JOIN inventory_skus ON inventory_skus.id = inventory_items.sku_id
+        LEFT JOIN inventory_categories ON inventory_categories.id = inventory_items.category_id
         WHERE inventory_items.business_id = $1
           ${branchFilter}
           ${searchFilter}
-        GROUP BY inventory_items.id
+        GROUP BY inventory_items.id, inventory_skus.id, inventory_categories.id
         ORDER BY LOWER(inventory_items.name) ASC, inventory_items.id ASC
       `,
       params,
@@ -1704,7 +2134,7 @@ app.get("/api/inventory", authenticate, requireAccess((a, req) => (a.permissions
 });
 
 app.post("/api/inventory", authenticate, requireAccess((a) => a.permissions.sections.inventory && hasAllBranches(a)), async (req, res) => {
-  const { name, stocks, price, branchAllocations, imageData, imageMime, imageName } = req.body;
+  const { name, stocks, price, branchAllocations, imageData, imageMime, imageName, skuId, categoryId } = req.body;
   const validationMessage = validateInventoryFields({ name, stocks, price, branchAllocations });
   const imageValidationMessage = validateInventoryImage({ imageData, imageMime });
 
@@ -1755,9 +2185,16 @@ app.post("/api/inventory", authenticate, requireAccess((a) => a.permissions.sect
       return res.status(400).json({ message: "Select valid branches for this business." });
     }
 
+    const skuCategory = await resolveItemSkuCategory(client, businessId, skuId, categoryId);
+
+    if (skuCategory.error) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: skuCategory.error });
+    }
+
     const itemResult = await client.query(
       `
-        INSERT INTO inventory_items (business_id, name, stocks, price, sort_order, image_data, image_mime, image_name, created_by)
+        INSERT INTO inventory_items (business_id, name, stocks, price, sort_order, image_data, image_mime, image_name, created_by, sku_id, category_id)
         VALUES (
           $1,
           $2,
@@ -1767,7 +2204,9 @@ app.post("/api/inventory", authenticate, requireAccess((a) => a.permissions.sect
           $5,
           $6,
           $7,
-          $8
+          $8,
+          $9,
+          $10
         )
         RETURNING id, business_id, name, stocks, price, sort_order, image_data, image_mime, image_name, created_at, updated_at
       `,
@@ -1780,6 +2219,8 @@ app.post("/api/inventory", authenticate, requireAccess((a) => a.permissions.sect
         imageMime || null,
         imageName ? String(imageName).trim() : null,
         req.user.sub,
+        skuCategory.skuId,
+        skuCategory.categoryId,
       ],
     );
     const item = itemResult.rows[0];
@@ -1822,6 +2263,11 @@ app.post("/api/inventory", authenticate, requireAccess((a) => a.permissions.sect
           inventory_items.image_data,
           inventory_items.image_mime,
           inventory_items.image_name,
+          inventory_items.sku_id,
+          inventory_skus.sku AS sku_name,
+          inventory_skus.sku_number,
+          inventory_items.category_id,
+          inventory_categories.category_name,
           inventory_items.created_at,
           inventory_items.updated_at,
           COALESCE(
@@ -1838,8 +2284,10 @@ app.post("/api/inventory", authenticate, requireAccess((a) => a.permissions.sect
         FROM inventory_items
         LEFT JOIN inventory_item_branches ON inventory_item_branches.inventory_item_id = inventory_items.id
         LEFT JOIN branches ON branches.id = inventory_item_branches.branch_id
+        LEFT JOIN inventory_skus ON inventory_skus.id = inventory_items.sku_id
+        LEFT JOIN inventory_categories ON inventory_categories.id = inventory_items.category_id
         WHERE inventory_items.id = $1 AND inventory_items.business_id = $2
-        GROUP BY inventory_items.id
+        GROUP BY inventory_items.id, inventory_skus.id, inventory_categories.id
       `,
       [item.id, businessId],
     );
@@ -1958,10 +2406,23 @@ app.patch("/api/inventory/:id", authenticate, requireAccess((a) => a.permissions
     const oldPrice = Number(currentResult.rows[0].price || 0);
     const params = [itemId, businessId, String(name).trim(), itemPrice];
     let imageUpdate = "";
+    let skuCategoryUpdate = "";
 
     if (Object.hasOwn(req.body, "imageData")) {
       params.push(imageData || null, imageMime || null, imageName ? String(imageName).trim() : null);
-      imageUpdate = ", image_data = $5, image_mime = $6, image_name = $7";
+      imageUpdate = `, image_data = $${params.length - 2}, image_mime = $${params.length - 1}, image_name = $${params.length}`;
+    }
+
+    if (Object.hasOwn(req.body, "skuId")) {
+      const skuCategory = await resolveItemSkuCategory(client, businessId, req.body.skuId, req.body.categoryId);
+
+      if (skuCategory.error) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: skuCategory.error });
+      }
+
+      params.push(skuCategory.skuId, skuCategory.categoryId);
+      skuCategoryUpdate = `, sku_id = $${params.length - 1}, category_id = $${params.length}`;
     }
 
     await client.query(
@@ -1971,6 +2432,7 @@ app.patch("/api/inventory/:id", authenticate, requireAccess((a) => a.permissions
             price = $4,
             updated_at = NOW()
             ${imageUpdate}
+            ${skuCategoryUpdate}
         WHERE id = $1 AND business_id = $2
         RETURNING id
       `,
@@ -2444,6 +2906,8 @@ app.get("/api/pos/items", authenticatePos, async (req, res) => {
       AND (
         inventory_items.name ILIKE $3
         OR CAST(inventory_items.id AS TEXT) ILIKE $4
+        OR inventory_skus.sku ILIKE $3
+        OR inventory_categories.category_name ILIKE $3
       )
     `;
   }
@@ -2456,10 +2920,15 @@ app.get("/api/pos/items", authenticatePos, async (req, res) => {
           inventory_items.name,
           inventory_items.image_data,
           inventory_items.price,
-          inventory_item_branches.assigned_stocks AS stock_left
+          inventory_item_branches.assigned_stocks AS stock_left,
+          inventory_skus.sku AS sku_name,
+          inventory_skus.sku_number,
+          inventory_categories.category_name
         FROM inventory_items
         JOIN inventory_item_branches ON inventory_item_branches.inventory_item_id = inventory_items.id
         JOIN branches ON branches.id = inventory_item_branches.branch_id
+        LEFT JOIN inventory_skus ON inventory_skus.id = inventory_items.sku_id
+        LEFT JOIN inventory_categories ON inventory_categories.id = inventory_items.category_id
         WHERE inventory_items.business_id = $1
           AND inventory_item_branches.branch_id = $2
           AND branches.business_id = $1
@@ -2477,6 +2946,8 @@ app.get("/api/pos/items", authenticatePos, async (req, res) => {
         FROM inventory_items
         JOIN inventory_item_branches ON inventory_item_branches.inventory_item_id = inventory_items.id
         JOIN branches ON branches.id = inventory_item_branches.branch_id
+        LEFT JOIN inventory_skus ON inventory_skus.id = inventory_items.sku_id
+        LEFT JOIN inventory_categories ON inventory_categories.id = inventory_items.category_id
         WHERE inventory_items.business_id = $1
           AND inventory_item_branches.branch_id = $2
           AND branches.business_id = $1

@@ -62,6 +62,25 @@ function formatMoney(value) {
   });
 }
 
+// SKU numbers start at 1 and show at least three digits: 001, 002, ... 999, 1000.
+function formatSkuLabel(item) {
+  return item.skuName ? `${item.skuName} - ${String(item.skuNumber ?? "").padStart(3, "0")}` : "";
+}
+
+// Items are tagged by SKU; the item number only shows for items that have no SKU yet.
+function getItemTag(item) {
+  return formatSkuLabel(item) || item.itemCode || "";
+}
+
+function ItemTags({ item }) {
+  return (
+    <>
+      {item.skuName ? <small className="sku-tag-mobile">{formatSkuLabel(item)}</small> : null}
+      {item.categoryName ? <small className="category-tag">{item.categoryName}</small> : null}
+    </>
+  );
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -520,8 +539,9 @@ function ItemDetailsModal({ item, selectedQuantity, onAdd, onClose, viewOnly = f
           )}
         </div>
         <div className="detail-name-line">
-          <strong>{item.itemCode}</strong>
+          <strong>{getItemTag(item)}</strong>
           <span>{item.name}</span>
+          {item.categoryName ? <small>{item.categoryName}</small> : null}
         </div>
         <div className="detail-stock-line">
           <span>Available stock: {item.stockLeft}</span>
@@ -754,7 +774,7 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
         <p class="pos-confirm-text">It will be taken out of the current sale.</p>
         <div class="pos-confirm-card">
           <div>
-            <small>${escapeHtml(item.itemCode || "")}</small>
+            <small>${escapeHtml(getItemTag(item))}</small>
             <strong>${escapeHtml(item.name)}</strong>
             <span>${formatMoney(item.price)} x ${item.quantity}</span>
           </div>
@@ -1134,7 +1154,7 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
               {cart.map((item) => (
                 <article key={item.id} className="cart-item">
                   <div>
-                    <strong>{item.itemCode}</strong>
+                    <strong>{getItemTag(item)}</strong>
                     <h2>{item.name}</h2>
                     <p>{formatMoney(item.price)} per pcs</p>
                   </div>
@@ -1209,7 +1229,7 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
                         onClick={() => addItem(item)}
                         disabled={disabled}
                       >
-                        <span className="item-code">{item.itemCode}</span>
+                        <span className="item-code" title={getItemTag(item)}>{getItemTag(item)}</span>
                         {item.imageData ? (
                           <img src={item.imageData} alt={item.name} />
                         ) : (
@@ -1220,6 +1240,7 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
                           <span className="item-meta">
                             <small>{remaining} stocks</small>
                             <small>{formatMoney(item.price)}</small>
+                            <ItemTags item={item} />
                           </span>
                         </span>
                         <strong className="item-price">{formatMoney(item.price)}</strong>
@@ -1431,7 +1452,7 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
             {!loadingItems &&
               items.map((item) => (
                 <article key={item.id} className="item-row inventory-row">
-                  <span className="item-code">{item.itemCode}</span>
+                  <span className="item-code" title={getItemTag(item)}>{getItemTag(item)}</span>
                   {item.imageData ? (
                     <img src={item.imageData} alt={item.name} />
                   ) : (
@@ -1439,9 +1460,12 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
                   )}
                   <span className="inventory-summary">
                     <strong>{item.name}</strong>
-                    <small>
-                      {item.itemCode} - {item.stockLeft} stocks left
-                    </small>
+                    <small>{item.stockLeft} stocks left</small>
+                    {item.skuName || item.categoryName ? (
+                      <span className="item-meta">
+                        <ItemTags item={item} />
+                      </span>
+                    ) : null}
                   </span>
                   <strong className="inventory-price">{formatMoney(item.price)}</strong>
                   <button

@@ -260,6 +260,64 @@ export async function ensureSchema() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS inventory_skus (
+      id SERIAL PRIMARY KEY,
+      sku VARCHAR(120) NOT NULL,
+      sku_number INTEGER NOT NULL,
+      branch_id INTEGER REFERENCES branches(id) ON DELETE SET NULL,
+      business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      UNIQUE (business_id, sku_number)
+    );
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS inventory_skus_business_name_unique
+    ON inventory_skus (business_id, LOWER(sku));
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS inventory_categories (
+      id SERIAL PRIMARY KEY,
+      category_name VARCHAR(120) NOT NULL,
+      sku_id INTEGER NOT NULL REFERENCES inventory_skus(id) ON DELETE CASCADE,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS inventory_categories_sku_name_unique
+    ON inventory_categories (sku_id, LOWER(category_name));
+  `);
+
+  // SKU numbers come from a per-business counter, so a deleted SKU's number is never handed out again.
+  // 0 means none issued yet, so the first SKU is number 1 (shown as "001").
+  await pool.query(`
+    ALTER TABLE businesses
+      ADD COLUMN IF NOT EXISTS last_sku_number INTEGER NOT NULL DEFAULT 0;
+  `);
+
+  await pool.query(`
+    UPDATE businesses
+    SET last_sku_number = sku_max.max_number
+    FROM (
+      SELECT business_id, MAX(sku_number) AS max_number
+      FROM inventory_skus
+      GROUP BY business_id
+    ) sku_max
+    WHERE businesses.id = sku_max.business_id
+      AND businesses.last_sku_number < sku_max.max_number;
+  `);
+
+  await pool.query(`
+    ALTER TABLE inventory_items
+      ADD COLUMN IF NOT EXISTS sku_id INTEGER REFERENCES inventory_skus(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES inventory_categories(id) ON DELETE SET NULL;
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS inventory_item_branches (
       inventory_item_id INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
       branch_id INTEGER NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
