@@ -149,6 +149,38 @@ function readImageFileAsDataUrl(file) {
   });
 }
 
+// Phone photos are often 2-5 MB; inventory only needs a small picture, so scale it down to
+// at most 800px and re-encode it (WebP where the browser supports it, otherwise JPEG).
+async function shrinkImageFileToDataUrl(file, maxSize = 800) {
+  const source = await readImageFileAsDataUrl(file);
+  const image = await new Promise((resolve, reject) => {
+    const element = new Image();
+
+    element.onload = () => resolve(element);
+    element.onerror = () => reject(new Error("That file is not a supported image."));
+    element.src = source;
+  });
+  const scale = Math.min(1, maxSize / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  // JPEG has no transparency, so transparent PNG areas would turn black without a background.
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  const webp = canvas.toDataURL("image/webp", 0.82);
+  const dataUrl = webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/jpeg", 0.82);
+
+  return { dataUrl, mime: dataUrl.slice(5, dataUrl.indexOf(";")) };
+}
+
+function getInventoryImageSrc(item) {
+  return item?.imageUrl ? `${apiBaseUrl}${item.imageUrl}` : "";
+}
+
 async function cropImageToDataUrl(source, pixelCrop, outputWidth, outputHeight, mime) {
   const image = await new Promise((resolve, reject) => {
     const element = new Image();
@@ -1488,8 +1520,9 @@ function getInventoryImageError(file) {
     return "Use a JPG, PNG, WebP, or GIF image.";
   }
 
-  if (file.size > 5 * 1024 * 1024) {
-    return "Image must be 5 MB or smaller.";
+  // The image is shrunk before upload, so this only guards against files too big to open.
+  if (file.size > 15 * 1024 * 1024) {
+    return "Image must be 15 MB or smaller.";
   }
 
   return "";
@@ -1591,7 +1624,7 @@ function InventoryImageField({ imageUrl, fileName, onFile }) {
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-black">{fileName || (imageUrl ? "Current image" : "No image yet")}</p>
-          <p className="text-xs text-black/45">Drop an image here, or choose one. JPG, PNG, WebP, or GIF up to 5 MB.</p>
+          <p className="text-xs text-black/45">Drop an image here, or choose one. JPG, PNG, WebP, or GIF up to 15 MB. It is resized automatically.</p>
           <div className="mt-2 flex flex-wrap gap-2">
             <button
               type="button"
@@ -1825,7 +1858,7 @@ function InventoryItemModal({ mode, item, branches, skus, canDelete, onClose, on
   const skuCategories = selectedSku?.categories || [];
   const [allocations, setAllocations] = useState({});
   const [imageFile, setImageFile] = useState(null);
-  const [imagePreview, setImagePreview] = useState(item?.imageData || "");
+  const [imagePreview, setImagePreview] = useState(getInventoryImageSrc(item));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const isAdd = mode === "add";
@@ -1923,8 +1956,10 @@ function InventoryItemModal({ mode, item, branches, skus, canDelete, onClose, on
 
     try {
       if (imageFile) {
-        values.imageData = await readImageFileAsDataUrl(imageFile);
-        values.imageMime = imageFile.type;
+        const shrunk = await shrinkImageFileToDataUrl(imageFile);
+
+        values.imageData = shrunk.dataUrl;
+        values.imageMime = shrunk.mime;
         values.imageName = imageFile.name;
       } else if (isAdd) {
         values.imageData = null;
@@ -2344,9 +2379,10 @@ function InventoryImageModal({ item, onClose }) {
   return (
     <ModalShell size="xl" title={item.name} description={item.imageName || undefined} onClose={onClose}>
       <div className="flex min-h-[240px] items-center justify-center rounded-2xl bg-[repeating-conic-gradient(#f4f4f4_0_25%,#fff_0_50%)] bg-[length:20px_20px] p-2">
-        {item.imageData ? (
+        {item.imageUrl ? (
           <img
-            src={item.imageData}
+            src={getInventoryImageSrc(item)}
+            loading="lazy"
             alt={item.imageName || item.name}
             className="max-h-[65dvh] w-auto max-w-full rounded-xl object-contain shadow-panel"
           />
@@ -2528,6 +2564,42 @@ function formatMoney(value) {
 function removeSavedAuth() {
   try {
     window.localStorage.removeItem(storageKey);
+  } catch {
+    // Browser storage can be unavailable in strict privacy modes.
+  }
+
+  clearApiCache();
+}
+
+// Last response per user and path, shown instantly on the next visit while fresh data loads.
+const apiCachePrefix = "cowflo-cache:";
+
+function getApiCacheKey(userId, path) {
+  return `${apiCachePrefix}${userId}:${path}`;
+}
+
+function readApiCache(userId, path) {
+  try {
+    const raw = window.localStorage.getItem(getApiCacheKey(userId, path));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeApiCache(userId, path, payload) {
+  try {
+    window.localStorage.setItem(getApiCacheKey(userId, path), JSON.stringify(payload));
+  } catch {
+    // Storage full or unavailable: the page still works, it just loads from the server.
+  }
+}
+
+function clearApiCache() {
+  try {
+    Object.keys(window.localStorage)
+      .filter((key) => key.startsWith(apiCachePrefix))
+      .forEach((key) => window.localStorage.removeItem(key));
   } catch {
     // Browser storage can be unavailable in strict privacy modes.
   }
@@ -2870,13 +2942,32 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
     return payload;
   }
 
+  // Shows the cached copy of `path` right away (if any), then replaces it with fresh data.
+  // Returns whether a cached copy was shown, so callers can skip their loading state.
+  function loadCachedApi(path, apply, onError) {
+    const cached = readApiCache(auth.user.id, path);
+
+    if (cached) {
+      apply(cached);
+    }
+
+    const request = requestBranchApi(path).then((payload) => {
+      writeApiCache(auth.user.id, path, payload);
+      apply(payload);
+      return payload;
+    });
+
+    return { hadCache: Boolean(cached), request: onError ? request.catch(onError) : request };
+  }
+
   async function loadBranches() {
-    setBranchesLoading(true);
     setBranchesMessage("");
 
     try {
-      const payload = await requestBranchApi("/branches");
-      setBranches(payload.branches);
+      const { hadCache, request } = loadCachedApi("/branches", (payload) => setBranches(payload.branches));
+
+      setBranchesLoading(!hadCache);
+      await request;
     } catch (error) {
       setBranchesMessage(error.message);
     } finally {
@@ -3155,7 +3246,6 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
   }, [activeSection]);
 
   async function loadInventory() {
-    setInventoryLoading(true);
     setInventoryMessage("");
 
     try {
@@ -3167,10 +3257,12 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
         params.set("search", inventorySearch.trim());
       }
 
-      const payload = await requestBranchApi(
-        `/inventory?${params.toString()}`,
+      const { hadCache, request } = loadCachedApi(`/inventory?${params.toString()}`, (payload) =>
+        setInventoryItems(payload.inventoryItems),
       );
-      setInventoryItems(payload.inventoryItems);
+
+      setInventoryLoading(!hadCache);
+      await request;
     } catch (error) {
       setInventoryMessage(error.message);
     } finally {
@@ -3187,9 +3279,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
   // SKUs feed the inventory item form; Settings > Business manages them.
   useEffect(() => {
     if (activeSection === "Inventory") {
-      requestBranchApi("/skus")
-        .then((payload) => setSkus(payload.skus))
-        .catch((error) => setInventoryMessage(error.message));
+      loadCachedApi("/skus", (payload) => setSkus(payload.skus), (error) => setInventoryMessage(error.message));
     }
   }, [activeSection]);
 
@@ -3284,12 +3374,13 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
       tz: getBrowserTimeZone(),
     });
 
-    requestBranchApi(`/dashboard?${params.toString()}`)
-      .then((payload) => {
-        if (!cancelled) {
-          setDashboardData(payload);
-        }
-      })
+    const { request } = loadCachedApi(`/dashboard?${params.toString()}`, (payload) => {
+      if (!cancelled) {
+        setDashboardData(payload);
+      }
+    });
+
+    request
       .catch((error) => {
         if (!cancelled) {
           setDashboardMessage(error.message);
@@ -4247,14 +4338,15 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                       }`}
                     >
                       <p className="font-semibold text-black/70">#{item.id}</p>
-                      {item.imageData ? (
+                      {item.imageUrl ? (
                         <button
                           type="button"
                           onClick={() => handleViewInventoryImage(item)}
                           className="inline-flex h-14 w-14 items-center justify-center overflow-hidden rounded-xl border border-black/8 bg-black/3 transition hover:ring-2 hover:ring-brand/30"
                         >
                           <img
-                            src={item.imageData}
+                            src={getInventoryImageSrc(item)}
+            loading="lazy"
                             alt={item.imageName || item.name}
                             className="h-full w-full object-cover"
                           />
@@ -4826,14 +4918,15 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                               } ${index > 0 ? "border-t border-black/8" : ""}`}
                             >
                               <p className="font-semibold text-black/70">#{item.id}</p>
-                              {item.imageData ? (
+                              {item.imageUrl ? (
                                 <button
                                   type="button"
                                   onClick={() => handleViewInventoryImage(item)}
                                   className="inline-flex h-14 w-14 items-center justify-center overflow-hidden rounded-xl border border-black/8 bg-black/3 transition hover:ring-2 hover:ring-brand/30"
                                 >
                                   <img
-                                    src={item.imageData}
+                                    src={getInventoryImageSrc(item)}
+            loading="lazy"
                                     alt={item.imageName || item.name}
                                     className="h-full w-full object-cover"
                                   />

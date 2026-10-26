@@ -317,6 +317,18 @@ export async function ensureSchema() {
       ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES inventory_categories(id) ON DELETE SET NULL;
   `);
 
+  // Versions the image URL, so browsers cache an item's image until the image itself changes.
+  await pool.query(`
+    ALTER TABLE inventory_items
+      ADD COLUMN IF NOT EXISTS image_updated_at TIMESTAMP WITH TIME ZONE;
+  `);
+
+  await pool.query(`
+    UPDATE inventory_items
+    SET image_updated_at = COALESCE(updated_at, created_at, NOW())
+    WHERE image_data IS NOT NULL AND image_updated_at IS NULL;
+  `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS inventory_item_branches (
       inventory_item_id INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,

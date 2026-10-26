@@ -1,7 +1,7 @@
 import "dotenv/config";
 import bcrypt from "bcryptjs";
 import cors from "cors";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import express from "express";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
@@ -241,6 +241,28 @@ function serializeBranch(branch) {
   };
 }
 
+// Lists carry a link to each image instead of the image itself; the link changes only when the
+// image does, so browsers can cache it for good. The signature stops other items being guessed.
+function signInventoryImage(itemId, version) {
+  return createHmac("sha256", jwtSecret).update(`inventory-image:${itemId}:${version}`).digest("hex").slice(0, 24);
+}
+
+function getInventoryImageUrl(item) {
+  if (!item.has_image) {
+    return null;
+  }
+
+  const version = new Date(item.image_updated_at || item.updated_at || 0).getTime();
+
+  return `/inventory-images/${item.id}?v=${version}&s=${signInventoryImage(item.id, version)}`;
+}
+
+// Selected in place of image_data so lists never pull image bytes out of the database.
+const inventoryImageColumns = `
+  (inventory_items.image_data IS NOT NULL) AS has_image,
+  inventory_items.image_updated_at
+`;
+
 function serializeInventoryItem(item) {
   return {
     id: item.id,
@@ -250,7 +272,7 @@ function serializeInventoryItem(item) {
     branchStock: Number(item.branch_stock || 0),
     price: Number(item.price || 0),
     sortOrder: item.sort_order,
-    imageData: item.image_data,
+    imageUrl: getInventoryImageUrl(item),
     imageMime: item.image_mime,
     imageName: item.image_name,
     skuId: item.sku_id ?? null,
@@ -423,7 +445,7 @@ function serializePosItem(item) {
     id: item.id,
     itemCode: `ITEM-${String(item.id).padStart(4, "0")}`,
     name: item.name,
-    imageData: item.image_data,
+    imageUrl: getInventoryImageUrl(item),
     stockLeft: Number(item.stock_left || 0),
     price: Number(item.price || 0),
     skuName: item.sku_name ?? null,
@@ -1775,7 +1797,46 @@ async function resolveSkuBranchId(businessId, rawBranchId) {
 
 const isUniqueViolation = (error) => error?.code === "23505";
 
-app.get("/api/skus", authenticate, requireAccess((a) => a.permissions.sections.inventory || a.permissions.businessSettings), async (req, res) => {
+// Public on purpose: <img> tags cannot send a login token, so the signed link is the permission.
+app.get("/api/inventory-images/:id", async (req, res) => {
+  const itemId = Number(req.params.id);
+  const version = String(req.query.v || "");
+  const signature = Buffer.from(String(req.query.s || ""));
+  const expected = Buffer.from(signInventoryImage(itemId, version));
+
+  if (!Number.isInteger(itemId) || itemId <= 0 || signature.length !== expected.length || !timingSafeEqual(signature, expected)) {
+    return res.status(404).end();
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT image_data, image_mime, image_updated_at, updated_at FROM inventory_items WHERE id = $1",
+      [itemId],
+    );
+    const item = result.rows[0];
+    const match = /^data:([\w/+.-]+);base64,(.*)$/s.exec(item?.image_data || "");
+
+    if (!match) {
+      return res.status(404).end();
+    }
+
+    const currentVersion = String(new Date(item.image_updated_at || item.updated_at || 0).getTime());
+
+    res.set({
+      "Content-Type": item.image_mime || match[1],
+      // An old link (image since replaced) still works but is not cached for long.
+      "Cache-Control": currentVersion === version ? "public, max-age=31536000, immutable" : "public, max-age=60",
+      "Cross-Origin-Resource-Policy": "cross-origin",
+    });
+
+    return res.send(Buffer.from(match[2], "base64"));
+  } catch (error) {
+    console.error(error);
+    return res.status(500).end();
+  }
+});
+
+app.get("/api/skus", authenticate,requireAccess((a) => a.permissions.sections.inventory || a.permissions.businessSettings), async (req, res) => {
   try {
     const businessId = await getCurrentBusinessId(req.user.sub);
     const result = await pool.query(
@@ -2089,7 +2150,7 @@ app.get("/api/inventory", authenticate,requireAccess((a, req) => (a.permissions.
           inventory_items.price,
           COALESCE(MAX(inventory_item_branches.assigned_stocks), 0) AS branch_stock,
           inventory_items.sort_order,
-          inventory_items.image_data,
+          ${inventoryImageColumns},
           inventory_items.image_mime,
           inventory_items.image_name,
           inventory_items.sku_id,
@@ -2194,7 +2255,7 @@ app.post("/api/inventory", authenticate, requireAccess((a) => a.permissions.sect
 
     const itemResult = await client.query(
       `
-        INSERT INTO inventory_items (business_id, name, stocks, price, sort_order, image_data, image_mime, image_name, created_by, sku_id, category_id)
+        INSERT INTO inventory_items (business_id, name, stocks, price, sort_order, image_data, image_mime, image_name, created_by, sku_id, category_id, image_updated_at)
         VALUES (
           $1,
           $2,
@@ -2206,9 +2267,10 @@ app.post("/api/inventory", authenticate, requireAccess((a) => a.permissions.sect
           $7,
           $8,
           $9,
-          $10
+          $10,
+          CASE WHEN $5::text IS NULL THEN NULL ELSE NOW() END
         )
-        RETURNING id, business_id, name, stocks, price, sort_order, image_data, image_mime, image_name, created_at, updated_at
+        RETURNING id
       `,
       [
         businessId,
@@ -2260,7 +2322,7 @@ app.post("/api/inventory", authenticate, requireAccess((a) => a.permissions.sect
           inventory_items.stocks,
           inventory_items.price,
           inventory_items.sort_order,
-          inventory_items.image_data,
+          ${inventoryImageColumns},
           inventory_items.image_mime,
           inventory_items.image_name,
           inventory_items.sku_id,
@@ -2410,7 +2472,7 @@ app.patch("/api/inventory/:id", authenticate, requireAccess((a) => a.permissions
 
     if (Object.hasOwn(req.body, "imageData")) {
       params.push(imageData || null, imageMime || null, imageName ? String(imageName).trim() : null);
-      imageUpdate = `, image_data = $${params.length - 2}, image_mime = $${params.length - 1}, image_name = $${params.length}`;
+      imageUpdate = `, image_data = $${params.length - 2}, image_mime = $${params.length - 1}, image_name = $${params.length}, image_updated_at = NOW()`;
     }
 
     if (Object.hasOwn(req.body, "skuId")) {
@@ -2918,7 +2980,7 @@ app.get("/api/pos/items", authenticatePos, async (req, res) => {
         SELECT
           inventory_items.id,
           inventory_items.name,
-          inventory_items.image_data,
+          ${inventoryImageColumns},
           inventory_items.price,
           inventory_item_branches.assigned_stocks AS stock_left,
           inventory_skus.sku AS sku_name,

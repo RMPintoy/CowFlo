@@ -16,6 +16,36 @@ const apiBaseUrl = resolveApiBaseUrl();
 const storageKey = "cowflow-pos-session";
 const pageSize = 8;
 
+// Last item list per page/search, shown instantly while fresh stock loads. Cleared on sign-out.
+const posCachePrefix = "cowflow-pos-cache:";
+
+function readPosCache(path) {
+  try {
+    const raw = window.localStorage.getItem(posCachePrefix + path);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePosCache(path, payload) {
+  try {
+    window.localStorage.setItem(posCachePrefix + path, JSON.stringify(payload));
+  } catch {
+    // Storage full or unavailable: items still load from the server.
+  }
+}
+
+function clearPosCache() {
+  try {
+    Object.keys(window.localStorage)
+      .filter((key) => key.startsWith(posCachePrefix))
+      .forEach((key) => window.localStorage.removeItem(key));
+  } catch {
+    // Browser storage can be unavailable in strict privacy modes.
+  }
+}
+
 class AppErrorBoundary extends Component {
   constructor(props) {
     super(props);
@@ -31,6 +61,7 @@ class AppErrorBoundary extends Component {
 
   resetPos() {
     window.localStorage.removeItem(storageKey);
+    clearPosCache();
     window.location.reload();
   }
 
@@ -233,12 +264,14 @@ function readSavedSession() {
       !parsed?.session?.branch?.name
     ) {
       window.localStorage.removeItem(storageKey);
+      clearPosCache();
       return null;
     }
 
     return parsed;
   } catch {
     window.localStorage.removeItem(storageKey);
+    clearPosCache();
     return null;
   }
 }
@@ -532,8 +565,8 @@ function ItemDetailsModal({ item, selectedQuantity, onAdd, onClose, viewOnly = f
           x
         </button>
         <div className="detail-image-wrap">
-          {item.imageData ? (
-            <img src={item.imageData} alt={item.name} />
+          {item.imageUrl ? (
+            <img src={`${apiBaseUrl}${item.imageUrl}`} alt={item.name} loading="lazy" />
           ) : (
             <span className="detail-image-placeholder">IMG</span>
           )}
@@ -650,24 +683,36 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
   }
 
   async function loadItems(nextPage = page) {
-    setLoadingItems(true);
     setMessage("");
 
-    try {
-      const params = new URLSearchParams({
-        page: String(nextPage),
-        limit: String(pageSize),
-      });
+    const params = new URLSearchParams({
+      page: String(nextPage),
+      limit: String(pageSize),
+    });
 
-      if (search.trim()) {
-        params.set("search", search.trim());
-      }
+    if (search.trim()) {
+      params.set("search", search.trim());
+    }
 
-      const payload = await requestPos(`/pos/items?${params.toString()}`);
-
+    const path = `/pos/items?${params.toString()}`;
+    const showItems = (payload) => {
       setItems(payload.items);
       setPage(payload.page);
       setTotalPages(payload.totalPages);
+    };
+    const cached = readPosCache(path);
+
+    if (cached) {
+      showItems(cached);
+    }
+
+    setLoadingItems(!cached);
+
+    try {
+      const payload = await requestPos(path);
+
+      writePosCache(path, payload);
+      showItems(payload);
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -1230,8 +1275,8 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
                         disabled={disabled}
                       >
                         <span className="item-code" title={getItemTag(item)}>{getItemTag(item)}</span>
-                        {item.imageData ? (
-                          <img src={item.imageData} alt={item.name} />
+                        {item.imageUrl ? (
+                          <img src={`${apiBaseUrl}${item.imageUrl}`} alt={item.name} loading="lazy" />
                         ) : (
                           <span className="image-placeholder">IMG</span>
                         )}
@@ -1453,8 +1498,8 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
               items.map((item) => (
                 <article key={item.id} className="item-row inventory-row">
                   <span className="item-code" title={getItemTag(item)}>{getItemTag(item)}</span>
-                  {item.imageData ? (
-                    <img src={item.imageData} alt={item.name} />
+                  {item.imageUrl ? (
+                    <img src={`${apiBaseUrl}${item.imageUrl}`} alt={item.name} loading="lazy" />
                   ) : (
                     <span className="image-placeholder">IMG</span>
                   )}
@@ -1521,6 +1566,7 @@ function AppContent() {
 
   function handleLogout(reason) {
     window.localStorage.removeItem(storageKey);
+    clearPosCache();
     setLogoutMessage(typeof reason === "string" ? reason : "");
     setAuth(null);
   }
