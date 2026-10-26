@@ -50,6 +50,8 @@ export async function ensureSchema() {
       ADD COLUMN IF NOT EXISTS password_otp_hash TEXT,
       ADD COLUMN IF NOT EXISTS password_otp_expires_at TIMESTAMP WITH TIME ZONE,
       ADD COLUMN IF NOT EXISTS password_otp_attempts INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS password_reset_hash TEXT,
+      ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMP WITH TIME ZONE,
       ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'owner',
       ADD COLUMN IF NOT EXISTS permissions JSONB;
   `);

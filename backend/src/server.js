@@ -1,7 +1,7 @@
 import "dotenv/config";
 import bcrypt from "bcryptjs";
 import cors from "cors";
-import { randomInt } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import express from "express";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
@@ -169,17 +169,24 @@ function requireAccess(check) {
 
 const section = (name) => (access) => access.permissions.sections[name];
 
+// Uppercases the first letter of each word and leaves the rest alone, so "McDonald" stays as typed.
+function capitalizeWords(value) {
+  return String(value ?? "").replace(/(^|[\s._-])(\p{L})/gu, (_, separator, letter) => separator + letter.toUpperCase());
+}
+
 function serializeUser(user) {
-  const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.name;
+  const firstName = capitalizeWords(user.first_name);
+  const lastName = capitalizeWords(user.last_name);
+  const fullName = [firstName, lastName].filter(Boolean).join(" ") || capitalizeWords(user.name);
 
   return {
     id: user.id,
-    firstName: user.first_name,
-    lastName: user.last_name,
-    username: user.username,
+    firstName,
+    lastName,
+    username: capitalizeWords(user.username),
     businessId: user.business_id,
     businessCode: user.business_id_code,
-    businessName: user.business_name,
+    businessName: capitalizeWords(user.business_name),
     businessLogo: user.logo_image || null,
     lowStockThreshold: Number(user.low_stock_threshold ?? 3),
     email: user.email,
@@ -533,7 +540,7 @@ function authenticate(req, res, next) {
   }
 }
 
-function authenticatePos(req, res, next) {
+async function authenticatePos(req, res, next) {
   const header = req.headers.authorization;
 
   if (!header?.startsWith("Bearer ")) {
@@ -541,19 +548,47 @@ function authenticatePos(req, res, next) {
   }
 
   const token = header.slice(7);
+  let payload;
 
   try {
-    const payload = jwt.verify(token, jwtSecret);
-
-    if (!payload.pos || !payload.businessId || !payload.branchId) {
-      return res.status(401).json({ message: "Invalid POS authorization token." });
-    }
-
-    req.pos = payload;
-    return next();
+    payload = jwt.verify(token, jwtSecret);
   } catch {
     return res.status(401).json({ message: "Invalid POS authorization token." });
   }
+
+  if (!payload.pos || !payload.businessId || !payload.branchId) {
+    return res.status(401).json({ message: "Invalid POS authorization token." });
+  }
+
+  // A POS token outlives a branch being disabled, so re-check the branch on every request.
+  try {
+    const branch = await pool.query(
+      `
+        SELECT branches.is_disabled
+        FROM branches
+        JOIN businesses ON businesses.id = branches.business_id
+        WHERE branches.id = $1 AND businesses.id = $2 AND businesses.status = 'A'
+      `,
+      [payload.branchId, payload.businessId],
+    );
+
+    if (!branch.rows[0]) {
+      return res.status(401).json({ code: "POS_SESSION_ENDED", message: "This branch no longer exists." });
+    }
+
+    if (branch.rows[0].is_disabled) {
+      return res.status(403).json({
+        code: "POS_SESSION_ENDED",
+        message: "This branch has been disabled. Ask the owner to enable it to use the POS.",
+      });
+    }
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Unable to check POS branch." });
+  }
+
+  req.pos = payload;
+  return next();
 }
 
 app.get("/api/health", async (_req, res) => {
@@ -603,14 +638,16 @@ app.post("/api/auth/signup", async (req, res) => {
   const normalizedEmail = String(email).trim().toLowerCase();
   const normalizedUsername = String(username).trim().toLowerCase();
   const passwordHash = await bcrypt.hash(password, 10);
-  const fullName = `${firstName.trim()} ${lastName.trim()}`;
+  const cleanFirstName = capitalizeWords(firstName.trim());
+  const cleanLastName = capitalizeWords(lastName.trim());
+  const fullName = `${cleanFirstName} ${cleanLastName}`;
 
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
 
-    let cleanBusinessName = businessName.trim();
+    let cleanBusinessName = capitalizeWords(businessName.trim());
     const existingBusiness = await client.query(
       "SELECT id, name, business_id_code FROM businesses WHERE LOWER(name) = LOWER($1) LIMIT 1",
       [cleanBusinessName],
@@ -678,8 +715,8 @@ app.post("/api/auth/signup", async (req, res) => {
       `,
       [
         fullName,
-        firstName.trim(),
-        lastName.trim(),
+        cleanFirstName,
+        cleanLastName,
         normalizedUsername,
         businessId,
         cleanBusinessName,
@@ -796,8 +833,8 @@ for (const [path, column, label] of [
 }
 
 app.put("/api/me/account", authenticate, requireAccess((a) => a.permissions.accountSettings), async (req, res) => {
-  const firstName = String(req.body.firstName || "").trim();
-  const lastName = String(req.body.lastName || "").trim();
+  const firstName = capitalizeWords(String(req.body.firstName || "").trim());
+  const lastName = capitalizeWords(String(req.body.lastName || "").trim());
   const username = String(req.body.username || "").trim().toLowerCase();
   const email = String(req.body.email || "").trim().toLowerCase();
 
@@ -849,13 +886,13 @@ const mailTransport = smtpConfigured
     })
   : null;
 const mailFrom = process.env.MAIL_FROM || `CowFlo <${process.env.SMTP_USER}>`;
-const passwordOtpLifetimeMs = 2 * 60 * 1000;
-const passwordOtpMaxAttempts = 5;
+const passwordResetLifetimeMs = 30 * 60 * 1000;
+const passwordResetCooldownMs = 60 * 1000;
+// Links in emails always point at our own site, never at a request header an attacker could set.
+const appUrl = (process.env.APP_URL || configuredCorsOrigins[0] || "http://localhost:3000").replace(/\/+$/, "");
 
-function generateTemporaryPassword(length = 12) {
-  const characters = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
-
-  return Array.from({ length }, () => characters[randomInt(characters.length)]).join("");
+function hashResetToken(token) {
+  return createHash("sha256").update(String(token)).digest("hex");
 }
 
 function escapeEmailHtml(value) {
@@ -876,161 +913,191 @@ async function verifyCurrentPassword(userId, password) {
   return Boolean(result.rows[0]) && bcrypt.compare(String(password), result.rows[0].password_hash);
 }
 
-app.post("/api/me/password/forgot", authenticate, requireAccess((a) => a.permissions.accountSettings), async (req, res) => {
+// Emails a one-time reset link. Returns "cooldown" if a link was sent less than a minute ago.
+async function sendPasswordResetLink(user) {
+  const activeExpiresAt = user.password_reset_expires_at ? new Date(user.password_reset_expires_at).getTime() : 0;
+
+  if (activeExpiresAt - passwordResetLifetimeMs + passwordResetCooldownMs > Date.now()) {
+    return "cooldown";
+  }
+
+  const token = randomBytes(32).toString("hex");
+  const link = `${appUrl}/reset-password?token=${token}`;
+  const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.name;
+
+  await pool.query(
+    "UPDATE users SET password_reset_hash = $1, password_reset_expires_at = $2 WHERE id = $3",
+    [hashResetToken(token), new Date(Date.now() + passwordResetLifetimeMs), user.id],
+  );
+
   if (!mailTransport) {
-    return res.status(503).json({
-      message: "Email is not set up on the server yet. Ask the administrator to configure SMTP.",
-    });
+    console.log(`[password reset] SMTP is not set up. Reset link for ${user.email}: ${link}`);
+    return "logged";
   }
 
   try {
-    const userResult = await pool.query(
-      `
-        SELECT id, email, first_name, last_name, name, password_otp_expires_at
-        FROM users
-        WHERE id = $1
+    await mailTransport.sendMail({
+      from: mailFrom,
+      to: user.email,
+      subject: "Reset your CowFlo password",
+      text: [
+        `Hi ${displayName},`,
+        "",
+        "Open this link to set a new CowFlo password:",
+        link,
+        "",
+        "The link works once and expires in 30 minutes.",
+        "",
+        "If you did not ask for this, you can ignore this email. Your password stays the same.",
+      ].join("\n"),
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#111">
+          <h2 style="margin:0 0 16px">Reset your CowFlo password</h2>
+          <p>Hi ${escapeEmailHtml(displayName)},</p>
+          <p>Click the button below to set a new password.</p>
+          <p style="text-align:center;margin:28px 0">
+            <a href="${escapeEmailHtml(link)}" style="display:inline-block;background:#63e050;color:#000;font-weight:bold;text-decoration:none;padding:14px 28px;border-radius:12px">Set a new password</a>
+          </p>
+          <p style="font-size:13px;color:#555">Or paste this link into your browser:<br><span style="word-break:break-all">${escapeEmailHtml(link)}</span></p>
+          <p>The link works once and expires in <b>30 minutes</b>.</p>
+          <p style="color:#555">If you did not ask for this, you can ignore this email. Your password stays the same.</p>
+        </div>
       `,
-      [req.user.sub],
-    );
+    });
+  } catch (error) {
+    await pool.query("UPDATE users SET password_reset_hash = NULL, password_reset_expires_at = NULL WHERE id = $1", [
+      user.id,
+    ]);
+    throw error;
+  }
+
+  return "sent";
+}
+
+const passwordResetUserColumns = "id, email, first_name, last_name, name, password_reset_expires_at";
+
+app.post("/api/me/password/forgot", authenticate, requireAccess((a) => a.permissions.accountSettings), async (req, res) => {
+  try {
+    const userResult = await pool.query(`SELECT ${passwordResetUserColumns} FROM users WHERE id = $1`, [req.user.sub]);
     const user = userResult.rows[0];
 
     if (!user) {
       return res.status(404).json({ message: "User not found." });
     }
 
-    const activeExpiresAt = user.password_otp_expires_at ? new Date(user.password_otp_expires_at) : null;
+    const outcome = await sendPasswordResetLink(user);
 
-    if (activeExpiresAt && activeExpiresAt.getTime() > Date.now()) {
-      return res.status(409).json({
-        code: "OTP_ACTIVE",
-        message: "A code was already sent. Enter it, or wait until it expires to resend.",
-        email: user.email,
-        expiresAt: activeExpiresAt.toISOString(),
-      });
-    }
-
-    const otp = String(randomInt(0, 1000000)).padStart(6, "0");
-    const expiresAt = new Date(Date.now() + passwordOtpLifetimeMs);
-    const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.name;
-
-    await pool.query(
-      `
-        UPDATE users
-        SET password_otp_hash = $1, password_otp_expires_at = $2, password_otp_attempts = 0
-        WHERE id = $3
-      `,
-      [await bcrypt.hash(otp, 10), expiresAt, user.id],
-    );
-
-    try {
-      await mailTransport.sendMail({
-        from: mailFrom,
-        to: user.email,
-        subject: `${otp} is your CowFlo verification code`,
-        text: [
-          `Hi ${displayName},`,
-          "",
-          `Your CowFlo verification code is: ${otp}`,
-          "",
-          "This code expires in 2 minutes. Never share it with anyone.",
-          "",
-          "If you did not request this, change your password immediately.",
-        ].join("\n"),
-        html: `
-          <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#111">
-            <h2 style="margin:0 0 16px">Your CowFlo verification code</h2>
-            <p>Hi ${escapeEmailHtml(displayName)},</p>
-            <p>Use this code to reset your CowFlo password:</p>
-            <p style="background:#f4f4f4;border-radius:12px;padding:18px;text-align:center;font-family:monospace;font-size:32px;font-weight:bold;letter-spacing:10px">${otp}</p>
-            <p>This code expires in <b>2 minutes</b>. Never share it with anyone.</p>
-            <p style="color:#b91c1c"><b>If you did not request this, change your password immediately.</b></p>
-          </div>
-        `,
-      });
-    } catch (error) {
-      await pool.query(
-        "UPDATE users SET password_otp_hash = NULL, password_otp_expires_at = NULL WHERE id = $1",
-        [user.id],
-      );
-      console.error(error);
-      return res.status(502).json({ message: "Unable to send the verification email. Try again later." });
+    if (outcome === "cooldown") {
+      return res.status(429).json({ message: "A reset link was just sent. Check your email, or wait a minute to send another." });
     }
 
     return res.json({
-      message: `We sent a 6-digit code to ${user.email}.`,
       email: user.email,
-      expiresAt: expiresAt.toISOString(),
+      message:
+        outcome === "logged"
+          ? "Email is not set up on this server, so the reset link was printed in the server log."
+          : `We sent a reset link to ${user.email}.`,
     });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ message: "Unable to start password reset." });
+    return res.status(502).json({ message: "Unable to send the reset email. Try again later." });
   }
 });
 
-app.post("/api/me/password/verify-otp", authenticate, requireAccess((a) => a.permissions.accountSettings), async (req, res) => {
-  const otp = String(req.body.otp || "").trim();
+app.post("/api/auth/password-reset/request", async (req, res) => {
+  const identifier = String(req.body.identifier || "").trim().toLowerCase();
 
-  if (!/^\d{6}$/.test(otp)) {
-    return res.status(400).json({ message: "Enter the 6-digit code." });
+  if (!identifier) {
+    return res.status(400).json({ message: "Enter your email or username." });
   }
+
+  // Same answer whether or not the account exists, so this can't be used to look up accounts.
+  const genericMessage = "If that account exists, we sent a reset link to its email.";
 
   try {
     const userResult = await pool.query(
-      `
-        SELECT id, password_otp_hash, password_otp_expires_at, password_otp_attempts
-        FROM users
-        WHERE id = $1
-      `,
-      [req.user.sub],
+      `SELECT ${passwordResetUserColumns} FROM users WHERE LOWER(email) = $1 OR LOWER(username) = $1 LIMIT 1`,
+      [identifier],
     );
-    const user = userResult.rows[0];
 
-    if (!user?.password_otp_hash || !user.password_otp_expires_at) {
-      return res.status(400).json({ code: "OTP_MISSING", message: "Request a new code first." });
+    if (userResult.rows[0]) {
+      await sendPasswordResetLink(userResult.rows[0]);
     }
 
-    if (new Date(user.password_otp_expires_at).getTime() <= Date.now()) {
-      return res.status(400).json({ code: "OTP_EXPIRED", message: "That code expired. Resend a new code." });
+    return res.json({ message: genericMessage });
+  } catch (error) {
+    console.error(error);
+    return res.status(502).json({ message: "Unable to send the reset email. Try again later." });
+  }
+});
+
+async function findUserByResetToken(token) {
+  if (!/^[a-f0-9]{64}$/.test(String(token || ""))) {
+    return null;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT id, email
+      FROM users
+      WHERE password_reset_hash = $1 AND password_reset_expires_at > NOW()
+    `,
+    [hashResetToken(token)],
+  );
+
+  return result.rows[0] || null;
+}
+
+app.get("/api/auth/password-reset/verify", async (req, res) => {
+  try {
+    const user = await findUserByResetToken(req.query.token);
+
+    if (!user) {
+      return res.status(400).json({ message: "This reset link is invalid or has expired. Ask for a new one." });
     }
 
-    if (user.password_otp_attempts >= passwordOtpMaxAttempts) {
-      return res.status(429).json({
-        code: "OTP_LOCKED",
-        message: "Too many wrong codes. Wait for this code to expire, then resend.",
-      });
+    return res.json({ email: user.email });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Unable to check the reset link." });
+  }
+});
+
+app.post("/api/auth/password-reset/confirm", async (req, res) => {
+  const { token, password, confirmPassword } = req.body;
+
+  if (!password || !confirmPassword) {
+    return res.status(400).json({ message: "Fill in both password fields." });
+  }
+
+  if (password !== confirmPassword) {
+    return res.status(400).json({ message: "Passwords do not match." });
+  }
+
+  if (String(password).length < 8) {
+    return res.status(400).json({ message: "Password must be at least 8 characters." });
+  }
+
+  try {
+    const user = await findUserByResetToken(token);
+
+    if (!user) {
+      return res.status(400).json({ message: "This reset link is invalid or has expired. Ask for a new one." });
     }
-
-    if (!(await bcrypt.compare(otp, user.password_otp_hash))) {
-      const attempts = user.password_otp_attempts + 1;
-      const remaining = passwordOtpMaxAttempts - attempts;
-
-      await pool.query("UPDATE users SET password_otp_attempts = $1 WHERE id = $2", [attempts, user.id]);
-
-      return res.status(400).json({
-        code: remaining > 0 ? "OTP_WRONG" : "OTP_LOCKED",
-        message:
-          remaining > 0
-            ? `Wrong code. ${remaining} ${remaining === 1 ? "try" : "tries"} left.`
-            : "Too many wrong codes. Wait for this code to expire, then resend.",
-      });
-    }
-
-    const newPassword = generateTemporaryPassword();
 
     await pool.query(
       `
         UPDATE users
-        SET password_hash = $1, password_otp_hash = NULL, password_otp_expires_at = NULL,
-          password_otp_attempts = 0
+        SET password_hash = $1, password_reset_hash = NULL, password_reset_expires_at = NULL
         WHERE id = $2
       `,
-      [await bcrypt.hash(newPassword, 10), user.id],
+      [await bcrypt.hash(String(password), 10), user.id],
     );
 
-    return res.json({ password: newPassword });
+    return res.json({ message: "Your password was changed. Sign in with your new password." });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ message: "Unable to verify the code." });
+    return res.status(500).json({ message: "Unable to change the password." });
   }
 });
 
@@ -1093,7 +1160,7 @@ app.put("/api/me/business/settings", authenticate, requireAccess((a) => a.permis
 });
 
 app.put("/api/me/business", authenticate, requireAccess((a) => a.permissions.businessSettings), async (req, res) => {
-  const businessName = String(req.body.businessName || "").trim();
+  const businessName = capitalizeWords(String(req.body.businessName || "").trim());
 
   if (!businessName) {
     return res.status(400).json({ message: "Business name is required." });
@@ -1231,8 +1298,8 @@ app.get("/api/accounts", authenticate, requireAccess((a) => a.permissions.manage
     return res.json({
       accounts: result.rows.map((user) => ({
         id: user.id,
-        name: [user.first_name, user.last_name].filter(Boolean).join(" ") || user.name,
-        username: user.username,
+        name: capitalizeWords([user.first_name, user.last_name].filter(Boolean).join(" ") || user.name),
+        username: capitalizeWords(user.username),
         email: user.email,
         role: user.role,
         permissions: getEffectivePermissions(user),
@@ -2290,13 +2357,13 @@ app.post("/api/pos/login", async (req, res) => {
           businesses.logo_image,
           branches.id AS branch_id,
           branches.name AS branch_name,
-          branches.pos_code
+          branches.pos_code,
+          branches.is_disabled
         FROM businesses
         JOIN branches ON branches.business_id = businesses.id
         WHERE UPPER(businesses.business_id_code) = UPPER($1)
           AND branches.pos_code = $2
           AND businesses.status = 'A'
-          AND branches.is_disabled = FALSE
         LIMIT 1
       `,
       [String(businessCode).trim(), String(code).trim()],
@@ -2305,6 +2372,12 @@ app.post("/api/pos/login", async (req, res) => {
 
     if (!session) {
       return res.status(401).json({ message: "Invalid Business Code or Code." });
+    }
+
+    if (session.is_disabled) {
+      return res.status(403).json({
+        message: "This branch has been disabled. Ask the owner to enable it to use the POS.",
+      });
     }
 
     const token = jwt.sign(

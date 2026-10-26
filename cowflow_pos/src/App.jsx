@@ -360,10 +360,10 @@ function getBrandInitials(name) {
   );
 }
 
-function LoginPage({ onLogin }) {
+function LoginPage({ onLogin, initialMessage = "" }) {
   const [businessCode, setBusinessCode] = useState("");
   const [code, setCode] = useState("");
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState(initialMessage);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(event) {
@@ -599,6 +599,13 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
     requestPos("/pos/session")
       .then((payload) => onSessionUpdate?.(payload.session))
       .catch(() => {});
+
+    // Re-check now and then so an idle POS still signs out soon after its branch is disabled.
+    const timer = window.setInterval(() => {
+      requestPos("/pos/session").catch(() => {});
+    }, 30000);
+
+    return () => window.clearInterval(timer);
   }, []);
 
   async function requestPos(path, options = {}) {
@@ -610,6 +617,10 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
       },
     });
     const payload = await response.json();
+
+    if (payload.code === "POS_SESSION_ENDED") {
+      onLogout(payload.message);
+    }
 
     if (!response.ok) {
       throw new Error(payload.message || "POS request failed.");
@@ -1482,14 +1493,16 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
 
 function AppContent() {
   const [auth, setAuth] = useState(readSavedSession);
+  const [logoutMessage, setLogoutMessage] = useState("");
 
-  function handleLogout() {
+  function handleLogout(reason) {
     window.localStorage.removeItem(storageKey);
+    setLogoutMessage(typeof reason === "string" ? reason : "");
     setAuth(null);
   }
 
   if (!auth) {
-    return <LoginPage onLogin={setAuth} />;
+    return <LoginPage key={logoutMessage} onLogin={setAuth} initialMessage={logoutMessage} />;
   }
 
   function handleSessionUpdate(session) {

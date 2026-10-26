@@ -223,9 +223,12 @@ Repeat 5.2 with a different name, e.g. `cowflopos` → `cowflopos.infinityfreeap
 
 ### 5.4 Turn on HTTPS for both
 
-1. In the Client Area open each hosting account → **SSL Certificates** (or **Free SSL**).
-2. If the subdomain doesn't already show an active certificate, request one for the domain and follow the steps until it's **Issued / Active**. Then **install** it on the hosting account if asked.
-3. Wait until `https://cowflo.infinityfreeapp.com` opens without a security warning. Do the same for the POS site.
+**Free subdomains (`*.infinityfreeapp.com`, etc.) get SSL automatically.** InfinityFree no longer lets you install a custom certificate on them, so there is nothing to set up.
+
+1. Open `https://cowflo.infinityfreeapp.com` (with `https://`) and check for the padlock in the address bar. Do the same for the POS site.
+2. If a brand-new account shows a security warning, wait 15–60 minutes and try again in a private window.
+
+*Only if you use your own domain* (e.g. `cowflo.com`): Client Area → **SSL Certificates** → request a certificate for the domain → add the CNAME records it shows at your domain registrar → verify → **Install** on the hosting account.
 
 Write both `https://…` addresses in your notepad as **Login site URL** and **POS site URL**.
 
@@ -248,6 +251,11 @@ The websites need to know your backend URL **at build time**. It's baked into th
    ```powershell
    cd C:\Users\Desktop24\Documents\GitHub\CowFlo
    ```
+   > **Error "npm.ps1 cannot be loaded because running scripts is disabled"?** Run this once, type `Y`, then continue:
+   > ```powershell
+   > Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+   > ```
+   > Or type `npm.cmd` instead of `npm` in the commands below.
 2. Set the backend URL (replace with **your** Backend URL — keep the `/api` at the end, no trailing slash):
    ```powershell
    $env:VITE_API_BASE_URL = "https://cowflo-api.onrender.com/api"
@@ -294,7 +302,7 @@ The backend only accepts requests from websites you list.
 1. Render dashboard → **cowflo-api** → **Environment**.
 2. Edit `CORS_ORIGIN` and set it to both site URLs, **comma-separated, no spaces, no trailing slash**:
    ```
-   https://cowflo.infinityfreeapp.com,https://cowflopos.infinityfreeapp.com
+   https://https://cowflo.site.je,https://https://cowflopos.site.je
    ```
 3. Click **Save, rebuild, and deploy** (or **Save Changes** and then **Manual Deploy → Deploy latest commit**). Wait for "Your service is live".
 

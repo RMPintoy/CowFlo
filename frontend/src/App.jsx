@@ -430,228 +430,6 @@ function ModalShell({ title, description, onClose, children, footer, size = "md"
   );
 }
 
-const otpLength = 6;
-
-function OtpModal({ email, expiresAt, onResend, onVerify, onClose }) {
-  const [digits, setDigits] = useState(() => Array(otpLength).fill(""));
-  const [now, setNow] = useState(Date.now());
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(null);
-  const inputRefs = useRef([]);
-  const secondsLeft = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - now) / 1000));
-  const expired = secondsLeft === 0;
-  const otp = digits.join("");
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    setDigits(Array(otpLength).fill(""));
-    setError("");
-    inputRefs.current[0]?.focus();
-  }, [expiresAt]);
-
-  function fillDigits(startIndex, text) {
-    const incoming = text.replace(/\D/g, "").slice(0, otpLength - startIndex).split("");
-
-    if (incoming.length === 0) {
-      return;
-    }
-
-    setDigits((current) => {
-      const next = [...current];
-      incoming.forEach((digit, offset) => {
-        next[startIndex + offset] = digit;
-      });
-      return next;
-    });
-    setError("");
-    inputRefs.current[Math.min(startIndex + incoming.length, otpLength - 1)]?.focus();
-  }
-
-  function handleKeyDown(index, event) {
-    if (event.key === "Backspace" && !digits[index] && index > 0) {
-      event.preventDefault();
-      setDigits((current) => current.map((digit, position) => (position === index - 1 ? "" : digit)));
-      inputRefs.current[index - 1]?.focus();
-    } else if (event.key === "ArrowLeft" && index > 0) {
-      inputRefs.current[index - 1]?.focus();
-    } else if (event.key === "ArrowRight" && index < otpLength - 1) {
-      inputRefs.current[index + 1]?.focus();
-    }
-  }
-
-  async function handleVerify(event) {
-    event.preventDefault();
-    setBusy("verify");
-    setError("");
-
-    try {
-      await onVerify(otp);
-    } catch (verifyError) {
-      setError(verifyError.message);
-      setDigits(Array(otpLength).fill(""));
-      inputRefs.current[0]?.focus();
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function handleResend() {
-    setBusy("resend");
-    setError("");
-
-    try {
-      await onResend();
-    } catch (resendError) {
-      setError(resendError.message);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <ModalShell
-      title="Enter verification code"
-      description={`We sent a 6-digit code to ${email}.`}
-      onClose={onClose}
-    >
-      <form onSubmit={handleVerify} className="space-y-5">
-        <div className="flex justify-center gap-2 sm:gap-3">
-          {digits.map((digit, index) => (
-            <input
-              key={index}
-              ref={(element) => {
-                inputRefs.current[index] = element;
-              }}
-              value={digit}
-              onChange={(event) => {
-                const value = event.target.value.replace(/\D/g, "");
-
-                if (!value) {
-                  setDigits((current) => current.map((item, position) => (position === index ? "" : item)));
-                  return;
-                }
-
-                fillDigits(index, value.slice(-1));
-              }}
-              onKeyDown={(event) => handleKeyDown(index, event)}
-              onPaste={(event) => {
-                event.preventDefault();
-                fillDigits(index, event.clipboardData.getData("text"));
-              }}
-              onFocus={(event) => event.target.select()}
-              inputMode="numeric"
-              autoComplete={index === 0 ? "one-time-code" : "off"}
-              maxLength={1}
-              disabled={expired}
-              aria-label={`Digit ${index + 1}`}
-              className="h-14 w-11 rounded-xl border border-black/15 bg-white text-center text-2xl font-semibold text-black outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/25 disabled:bg-black/5 disabled:text-black/30 sm:w-12"
-            />
-          ))}
-        </div>
-
-        <div className="text-center text-sm">
-          {expired ? (
-            <p className="font-medium text-red-600">The code expired.</p>
-          ) : (
-            <p className="text-black/55">
-              Code expires in{" "}
-              <span className="font-mono font-semibold text-black">
-                {Math.floor(secondsLeft / 60)}:{String(secondsLeft % 60).padStart(2, "0")}
-              </span>
-            </p>
-          )}
-          {error ? <p className="mt-2 font-medium text-red-600">{error}</p> : null}
-        </div>
-
-        <button
-          type="submit"
-          disabled={expired || otp.length !== otpLength || busy !== null}
-          className="inline-flex h-11 w-full items-center justify-center rounded-xl bg-black text-sm font-semibold text-white transition hover:bg-black/85 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {busy === "verify" ? "Verifying..." : "Verify code"}
-        </button>
-
-        <p className="text-center text-sm text-black/55">
-          Didn&apos;t get it?{" "}
-          <button
-            type="button"
-            onClick={handleResend}
-            disabled={!expired || busy !== null}
-            className="font-semibold text-black underline-offset-4 hover:underline disabled:cursor-not-allowed disabled:text-black/30 disabled:no-underline"
-          >
-            {busy === "resend" ? "Sending..." : expired ? "Resend code" : `Resend in ${secondsLeft}s`}
-          </button>
-        </p>
-      </form>
-    </ModalShell>
-  );
-}
-
-function NewPasswordModal({ password, onClose }) {
-  const [visible, setVisible] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  async function handleCopy() {
-    try {
-      await navigator.clipboard.writeText(password);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      setVisible(true);
-    }
-  }
-
-  return (
-    <ModalShell
-      title="Your new password"
-      description="Code verified. Save this password somewhere safe."
-      onClose={onClose}
-      footer={
-        <button
-          type="button"
-          onClick={onClose}
-          className="inline-flex h-10 items-center justify-center rounded-xl bg-black px-5 text-sm font-semibold text-white transition hover:bg-black/85"
-        >
-          Done
-        </button>
-      }
-    >
-      <div className="flex h-14 items-center gap-3 rounded-xl border border-black/10 bg-black/[0.02] px-4">
-        <FontAwesomeIcon icon={faLock} className="text-sm text-black/35" />
-        <span className="min-w-0 flex-1 truncate font-mono text-lg font-semibold tracking-wider text-black">
-          {visible ? password : "•".repeat(password.length)}
-        </span>
-        <button
-          type="button"
-          onClick={() => setVisible((current) => !current)}
-          aria-label={visible ? "Hide password" : "Show password"}
-          title={visible ? "Hide password" : "Show password"}
-          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-black/50 transition hover:bg-brand/15 hover:text-black"
-        >
-          <FontAwesomeIcon icon={visible ? faEyeSlash : faEye} />
-        </button>
-        <button
-          type="button"
-          onClick={handleCopy}
-          aria-label="Copy password"
-          title={copied ? "Copied" : "Copy password"}
-          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-black/50 transition hover:bg-brand/15 hover:text-black"
-        >
-          <FontAwesomeIcon icon={copied ? faCircleCheck : faCopy} />
-        </button>
-      </div>
-      <p className="mt-3 text-sm text-black/55">
-        Your old password no longer works. Use this one to sign in, or set your own below in{" "}
-        <b>Password</b>.
-      </p>
-    </ModalShell>
-  );
-}
-
 function getBrowserTimeZone() {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
@@ -1565,6 +1343,32 @@ function InventoryItemModal({ mode, item, branches, canDelete, onClose, onSave, 
   const isAdd = mode === "add";
   const totalStocks = Number.isInteger(Number(form.stocks)) && Number(form.stocks) > 0 ? Number(form.stocks) : 0;
 
+  // Puts the whole stock on the first ticked branch, as long as no other ticked branch has its own amount yet.
+  function fillFirstTickedBranch(next, total) {
+    const ticked = branches.filter((branch) => next[branch.id]?.checked);
+
+    if (ticked.length === 0 || ticked.slice(1).some((branch) => Number(next[branch.id].value || 0) > 0)) {
+      return next;
+    }
+
+    return { ...next, [ticked[0].id]: { ...next[ticked[0].id], value: total > 0 ? String(total) : "" } };
+  }
+
+  function handleAllocationsChange(next) {
+    const tickedIds = (value) =>
+      branches
+        .filter((branch) => value[branch.id]?.checked)
+        .map((branch) => branch.id)
+        .join();
+
+    // Only refill when ticks change, so typing a split amount by hand is left alone.
+    setAllocations(tickedIds(next) === tickedIds(allocations) ? next : fillFirstTickedBranch(next, totalStocks));
+  }
+
+  useEffect(() => {
+    setAllocations((current) => fillFirstTickedBranch(current, totalStocks));
+  }, [totalStocks]);
+
   function handleImageFile(file) {
     const imageError = getInventoryImageError(file);
 
@@ -1687,7 +1491,7 @@ function InventoryItemModal({ mode, item, branches, canDelete, onClose, onSave, 
             mode="add"
             total={totalStocks}
             allocations={allocations}
-            onChange={setAllocations}
+            onChange={handleAllocationsChange}
           />
         ) : null}
 
@@ -2288,53 +2092,15 @@ class AppErrorBoundary extends Component {
   }
 }
 
-function BrandPanel() {
-  return (
-    <div className="flex h-full flex-col justify-between rounded-[28px] bg-black p-8 text-white shadow-panel lg:p-10">
-      <div className="space-y-6">
-        <div className="inline-flex items-center gap-3 rounded-full border border-white/15 bg-white/5 px-4 py-2 text-sm text-white/80">
-          <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white">
-            <LogoMark className="h-10 w-10" />
-          </span>
-          CowFlo
-        </div>
-
-        <div className="space-y-4">
-          <p className="text-sm uppercase tracking-[0.2em] text-white/55">Farm operations portal</p>
-          <h1 className="max-w-sm text-4xl font-semibold leading-tight lg:text-5xl">
-            Keep every barn, crew, and milking shift in one clean flow.
-          </h1>
-          <p className="max-w-md text-base leading-7 text-white/72">
-            A focused workspace for daily livestock operations, team visibility, and better decisions.
-          </p>
-        </div>
-      </div>
-
-      <div className="grid gap-3 pt-8">
-        {[
-          { icon: faChartLine, label: "Operational snapshot at login" },
-          { icon: faShieldHeart, label: "Owner-protected account creation" },
-          { icon: faCircleCheck, label: "Fast access with a clean auth flow" },
-        ].map((item) => (
-          <div
-            key={item.label}
-            className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/85"
-          >
-            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/10 text-brand">
-              <FontAwesomeIcon icon={item.icon} />
-            </span>
-            <span>{item.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+const authFieldClass =
+  "group flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.06] px-4 py-3.5 transition focus-within:border-brand focus-within:bg-white/[0.09] focus-within:ring-4 focus-within:ring-brand/20";
+const authInputClass =
+  "w-full border-0 bg-transparent text-sm text-white outline-none placeholder:text-white/40";
 
 function InputField({ icon, type = "text", value, onChange, placeholder, autoComplete }) {
   return (
-    <label className="group flex items-center gap-3 rounded-2xl border border-black/10 bg-white px-4 py-4 transition focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/20">
-      <span className="text-black/45 transition group-focus-within:text-brand">
+    <label className={authFieldClass}>
+      <span className="text-white/45 transition group-focus-within:text-brand">
         <FontAwesomeIcon icon={icon} />
       </span>
       <input
@@ -2344,7 +2110,7 @@ function InputField({ icon, type = "text", value, onChange, placeholder, autoCom
         placeholder={placeholder}
         autoComplete={autoComplete}
         required
-        className="w-full border-0 bg-transparent text-sm text-black outline-none placeholder:text-black/35"
+        className={authInputClass}
       />
     </label>
   );
@@ -2354,8 +2120,8 @@ function PasswordField({ value, onChange, placeholder, autoComplete }) {
   const [visible, setVisible] = useState(false);
 
   return (
-    <label className="group flex items-center gap-3 rounded-2xl border border-black/10 bg-white px-4 py-4 transition focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/20">
-      <span className="text-black/45 transition group-focus-within:text-brand">
+    <label className={authFieldClass}>
+      <span className="text-white/45 transition group-focus-within:text-brand">
         <FontAwesomeIcon icon={faLock} />
       </span>
       <input
@@ -2365,13 +2131,13 @@ function PasswordField({ value, onChange, placeholder, autoComplete }) {
         placeholder={placeholder}
         autoComplete={autoComplete}
         required
-        className="w-full border-0 bg-transparent text-sm text-black outline-none placeholder:text-black/35"
+        className={authInputClass}
       />
       <button
         type="button"
         onClick={() => setVisible((current) => !current)}
         aria-label={visible ? "Hide password" : "Show password"}
-        className="text-black/40 transition hover:text-black"
+        className="text-white/45 transition hover:text-brand"
       >
         <FontAwesomeIcon icon={visible ? faEyeSlash : faEye} />
       </button>
@@ -2379,26 +2145,36 @@ function PasswordField({ value, onChange, placeholder, autoComplete }) {
   );
 }
 
-function AuthShell({ eyebrow, title, description, children, footer }) {
+function AuthShell({ eyebrow, title, description, children, footer, wide = false }) {
   return (
-    <main className="min-h-screen px-4 py-6 sm:px-6 lg:px-8">
-      <div className="mx-auto grid min-h-[calc(100vh-3rem)] max-w-6xl gap-6 lg:grid-cols-[1.08fr_0.92fr]">
-        <BrandPanel />
-
-        <section className="flex items-center justify-center rounded-[28px] border border-black/8 bg-white/90 p-6 shadow-panel backdrop-blur md:p-10">
-          <div className="w-full max-w-md space-y-8">
-            <div className="space-y-3">
-              <p className="text-sm uppercase tracking-[0.18em] text-black/45">{eyebrow}</p>
-              <div className="space-y-2">
-                <h2 className="text-3xl font-semibold text-black">{title}</h2>
-                <p className="text-sm leading-6 text-black/60">{description}</p>
-              </div>
-            </div>
-            {children}
-            {footer ? <div>{footer}</div> : null}
-          </div>
-        </section>
+    <main className="auth-card relative flex min-h-screen items-center justify-center overflow-hidden bg-[#0b0f0b] px-4 py-10 text-white sm:px-6">
+      <div aria-hidden="true" className="pointer-events-none absolute inset-0">
+        <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-green-700 via-brand to-green-700" />
+        <div className="absolute -right-32 -top-32 h-[28rem] w-[28rem] rounded-full bg-brand/15 blur-3xl" />
+        <div className="absolute -bottom-40 -left-32 h-[32rem] w-[32rem] rounded-full bg-green-700/20 blur-3xl" />
       </div>
+
+      <section className={`relative w-full ${wide ? "max-w-xl" : "max-w-md"} py-4`}>
+
+        <div className="relative flex items-center justify-center gap-3">
+          <LogoMark className="h-16 w-16 shrink-0 drop-shadow-[0_6px_18px_rgba(99,224,80,0.35)]" />
+          <div className="text-left">
+            <p className="text-3xl font-bold leading-none tracking-tight text-white">CowFlo</p>
+            <p className="mt-1.5 text-sm font-medium text-brand">Keep Moo-ving. No Bull.</p>
+          </div>
+        </div>
+
+        <div className="relative my-7 h-px bg-white/10" />
+
+        <div className="relative mb-6 space-y-1.5 text-center">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand/80">{eyebrow}</p>
+          <h1 className="text-xl font-semibold text-white sm:text-2xl">{title}</h1>
+          <p className="text-sm leading-6 text-white/55">{description}</p>
+        </div>
+
+        <div className="relative">{children}</div>
+        {footer ? <div className="relative mt-6 text-center">{footer}</div> : null}
+      </section>
     </main>
   );
 }
@@ -2471,10 +2247,9 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
   const [dashboardMessage, setDashboardMessage] = useState("");
   const [selectedBranch, setSelectedBranch] = useState(null);
   const [businessCodeVisible, setBusinessCodeVisible] = useState(false);
+  const [branchCodeVisible, setBranchCodeVisible] = useState(false);
   const [savingImage, setSavingImage] = useState(null);
   const [cropRequest, setCropRequest] = useState(null);
-  const [otpRequest, setOtpRequest] = useState(null);
-  const [revealedPassword, setRevealedPassword] = useState(null);
   const [settingsTab, setSettingsTab] = useState("Account");
   const [savingForm, setSavingForm] = useState(null);
   const [accountForm, setAccountForm] = useState(() => getAccountFormValues(auth.user));
@@ -2626,28 +2401,13 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
     }
   }
 
-  async function requestPasswordOtp() {
-    try {
-      const payload = await requestBranchApi("/me/password/forgot", { method: "POST" });
-
-      setOtpRequest({ email: payload.email, expiresAt: payload.expiresAt });
-    } catch (error) {
-      if (error.payload?.code === "OTP_ACTIVE") {
-        setOtpRequest({ email: error.payload.email, expiresAt: error.payload.expiresAt });
-        return;
-      }
-
-      throw error;
-    }
-  }
-
   async function handleForgotPassword() {
     const confirmation = await Swal.fire({
       title: "Forgot your password?",
-      html: `We will email a 6-digit code to <b>${escapeHtml(auth.user.email || "")}</b>.<br>The code expires in 2 minutes.`,
+      html: `We will email a link to <b>${escapeHtml(auth.user.email || "")}</b> where you can set a new password.<br>The link expires in 30 minutes.`,
       icon: "question",
       showCancelButton: true,
-      confirmButtonText: "Send code",
+      confirmButtonText: "Send link",
       confirmButtonColor: "#000000",
     });
 
@@ -2658,23 +2418,14 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
     setSavingForm("forgot");
 
     try {
-      await requestPasswordOtp();
+      const payload = await requestBranchApi("/me/password/forgot", { method: "POST" });
+
+      await Swal.fire("Check your email", payload.message, "success");
     } catch (error) {
-      await Swal.fire("Unable to send code", error.message, "error");
+      await Swal.fire("Unable to send link", error.message, "error");
     } finally {
       setSavingForm(null);
     }
-  }
-
-  async function handleVerifyOtp(otp) {
-    const payload = await requestBranchApi("/me/password/verify-otp", {
-      method: "POST",
-      body: JSON.stringify({ otp }),
-    });
-
-    setOtpRequest(null);
-    setPasswordForm(emptyPasswordForm);
-    setRevealedPassword(payload.password);
   }
 
   async function handlePasswordSave(event) {
@@ -3074,6 +2825,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
 
   function handleOpenBranch(branch) {
     setSelectedBranch(branch);
+    setBranchCodeVisible(false);
     setBranchReturnSection(null);
     setBranchInventoryLowOnly(false);
     setBranchSales(null);
@@ -3310,44 +3062,10 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
   }
 
   return (
-    <main
-      className={`min-h-screen bg-white pt-[60px] transition-[padding] duration-300 ${contentOffsetClass}`}
-    >
-      <header className="fixed inset-x-0 top-0 z-50 h-[60px] w-full border-b border-black/8 bg-white shadow-panel">
-        <div className="flex h-full w-full items-center justify-between gap-4 px-4">
-          <div className="flex min-w-0 items-center gap-3">
-            {!isDesktop ? (
-              <button
-                type="button"
-                onClick={() => setMobileSidebarOpen((current) => !current)}
-                aria-expanded={mobileSidebarOpen}
-                aria-controls="dashboard-sidebar"
-                aria-label={mobileSidebarOpen ? "Close menu" : "Open menu"}
-                title={mobileSidebarOpen ? "Close menu" : "Open menu"}
-                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg text-black transition hover:bg-brand/15"
-              >
-                <FontAwesomeIcon icon={mobileSidebarOpen ? faXmark : faBars} />
-              </button>
-            ) : null}
-            <h1 className="truncate text-lg font-semibold text-black sm:text-xl">{businessName}</h1>
-          </div>
-
-          <div className="flex shrink-0 items-center gap-3">
-            <p className="hidden text-sm font-medium text-black/65 sm:block">Welcome, {username}</p>
-            <span className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-brand/20 text-xs font-semibold text-black sm:hidden">
-              {auth.user.profileImage ? (
-                <img src={auth.user.profileImage} alt="Profile" className="h-full w-full object-cover" />
-              ) : (
-                getInitials(auth.user.name)
-              )}
-            </span>
-          </div>
-        </div>
-      </header>
-
+    <main className={`min-h-screen bg-[#f6f8f5] transition-[padding] duration-300 ${contentOffsetClass}`}>
       {!isDesktop && mobileSidebarOpen ? (
         <div
-          className="fixed inset-x-0 bottom-0 top-[60px] z-40 bg-black/40"
+          className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]"
           onClick={() => setMobileSidebarOpen(false)}
           aria-hidden="true"
         />
@@ -3355,10 +3073,37 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
 
       <aside
         id="dashboard-sidebar"
-        className={`fixed left-0 top-[60px] z-40 flex h-[calc(100dvh-60px)] flex-col border-r border-black/8 bg-white px-3 py-4 shadow-panel duration-300 ${
+        className={`fixed inset-y-0 left-0 z-50 flex h-dvh flex-col bg-[#0b0f0b] px-3 pb-4 pt-5 text-white shadow-[8px_0_40px_rgba(0,0,0,0.18)] duration-300 ${
           isDesktop ? "transition-[width]" : "transition-transform"
         } ${sidebarWidthClass}`}
       >
+        <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
+          <div className="absolute -left-20 -top-20 h-56 w-56 rounded-full bg-brand/15 blur-3xl" />
+          <div className="absolute -bottom-24 -right-24 h-56 w-56 rounded-full bg-green-700/20 blur-3xl" />
+        </div>
+
+        <div className={`relative flex items-center gap-2.5 pb-5 ${sidebarCompact ? "justify-center" : "px-1"}`}>
+          <LogoMark className="h-10 w-10 shrink-0 drop-shadow-[0_4px_12px_rgba(99,224,80,0.35)]" />
+          {!sidebarCompact ? (
+            <div className="min-w-0 flex-1">
+              <p className="text-lg font-bold leading-none tracking-tight">CowFlo</p>
+              <p className="mt-1 truncate text-[11px] font-medium text-brand">Keep Moo-ving. No Bull.</p>
+            </div>
+          ) : null}
+          {!isDesktop ? (
+            <button
+              type="button"
+              onClick={() => setMobileSidebarOpen(false)}
+              aria-label="Close menu"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-white/60 transition hover:bg-white/10 hover:text-white"
+            >
+              <FontAwesomeIcon icon={faXmark} />
+            </button>
+          ) : null}
+        </div>
+
+        <div className="relative mb-4 h-px bg-white/10" />
+
         {isDesktop ? (
           <button
             type="button"
@@ -3366,13 +3111,16 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
             aria-expanded={!sidebarCollapsed}
             aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className="absolute -right-4 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border border-black/8 bg-white text-xs text-black shadow-panel transition hover:bg-brand/15"
+            className="absolute -right-4 top-1/2 z-10 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border-2 border-[#f6f8f5] bg-brand text-xs text-black shadow-lg transition hover:brightness-110"
           >
             <FontAwesomeIcon icon={sidebarCollapsed ? faChevronRight : faChevronLeft} />
           </button>
         ) : null}
 
-        <nav className="grid gap-2">
+        {!sidebarCompact ? (
+          <p className="relative mb-2 px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/35">Menu</p>
+        ) : null}
+        <nav className="relative grid gap-1.5">
           {navigationItems.map((item) => (
             <button
               key={item.label}
@@ -3383,8 +3131,8 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                 sidebarCompact ? "justify-center" : "justify-start"
               } ${
                 activeSection === item.label
-                  ? "bg-brand/20 text-black"
-                  : "text-black/70 hover:bg-brand/15 hover:text-black"
+                  ? "bg-brand font-semibold text-black shadow-[0_6px_20px_rgba(99,224,80,0.25)]"
+                  : "text-white/65 hover:bg-white/[0.07] hover:text-white"
               }`}
             >
               <span className="flex h-5 w-5 items-center justify-center">
@@ -3399,7 +3147,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
           type="button"
           onClick={onLogout}
           title="Logout"
-          className={`mt-auto flex h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium text-red-600 transition hover:bg-red-50 ${
+          className={`relative mt-auto flex h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium text-red-400 transition hover:bg-red-500/10 hover:text-red-300 ${
             sidebarCompact ? "justify-center" : "justify-start"
           }`}
         >
@@ -3410,7 +3158,65 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
         </button>
       </aside>
 
-      <section className="main-container h-[calc(100dvh-60px)] w-full overflow-auto bg-white p-4 sm:p-6">
+      <div className="flex h-dvh flex-col">
+        <header className="relative z-30 shrink-0 border-b border-black/10 bg-white/85 backdrop-blur">
+          <div className="flex h-16 items-center justify-between gap-3 px-4 sm:px-6">
+            <div className="flex min-w-0 items-center gap-3">
+              {!isDesktop ? (
+                <button
+                  type="button"
+                  onClick={() => setMobileSidebarOpen((current) => !current)}
+                  aria-expanded={mobileSidebarOpen}
+                  aria-controls="dashboard-sidebar"
+                  aria-label={mobileSidebarOpen ? "Close menu" : "Open menu"}
+                  title={mobileSidebarOpen ? "Close menu" : "Open menu"}
+                  className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-lg text-black transition hover:bg-brand/15"
+                >
+                  <FontAwesomeIcon icon={mobileSidebarOpen ? faXmark : faBars} />
+                </button>
+              ) : null}
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[#0b0f0b] text-xs font-bold text-brand ring-1 ring-black/5">
+                {auth.user.businessLogo ? (
+                  <img src={auth.user.businessLogo} alt="Business logo" className="h-full w-full object-cover" />
+                ) : (
+                  getInitials(businessName)
+                )}
+              </span>
+              <div className="min-w-0">
+                <h1 className="truncate text-base font-semibold leading-tight text-black sm:text-lg">{businessName}</h1>
+                <p className="truncate text-xs text-black/50">
+                  Welcome back, <span className="font-medium text-green-700">{username}</span>
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => navigationItems.some((item) => item.label === "Profile") && handleSectionChange("Profile")}
+              title="Profile"
+              className="flex shrink-0 items-center gap-3 rounded-full border border-black/[0.06] bg-white py-1 pl-1 pr-1 shadow-sm transition hover:border-brand/40 hover:shadow-md sm:pr-4"
+            >
+              <span className="relative flex h-9 w-9 items-center justify-center rounded-full bg-brand/20 text-xs font-semibold text-black">
+                <span className="flex h-full w-full items-center justify-center overflow-hidden rounded-full">
+                  {auth.user.profileImage ? (
+                    <img src={auth.user.profileImage} alt="Profile" className="h-full w-full object-cover" />
+                  ) : (
+                    getInitials(auth.user.name)
+                  )}
+                </span>
+                <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white bg-brand" />
+              </span>
+              <span className="hidden min-w-0 text-left sm:block">
+                <span className="block max-w-[160px] truncate text-sm font-semibold leading-tight text-black">
+                  {auth.user.name}
+                </span>
+                <span className="block text-xs capitalize leading-tight text-black/50">{auth.user.role || "owner"}</span>
+              </span>
+            </button>
+          </div>
+        </header>
+
+      <section className="main-container min-h-0 w-full flex-1 overflow-auto bg-white p-4 sm:p-6">
         {navigationItems.length === 0 ? (
           <div className="mx-auto mt-10 max-w-md rounded-[28px] border border-dashed border-black/15 p-8 text-center">
             <FontAwesomeIcon icon={faLock} className="text-2xl text-black/30" />
@@ -3422,14 +3228,37 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
         ) : null}
 
         {navigationItems.length > 0 && activeSection !== "Profile" && activeSection !== "Dashboard" ? (
-          <div className="mb-6 border-b border-black/8 pb-5">
-            <p className="text-sm uppercase tracking-[0.18em] text-black/45">
-              {selectedBranch ? "Branch records" : activeSection}
-            </p>
-            <h2 className="mt-2 text-3xl font-semibold text-black">
-              {selectedBranch ? selectedBranch.name : activeSection}
-            </h2>
-          </div>
+          <nav aria-label="Breadcrumb" className="-mt-2.5 mb-4 sm:-mt-4">
+            <ol className="flex flex-wrap items-center gap-1.5 text-sm text-black/45">
+              {(selectedBranch
+                ? [
+                    branchReturnSection
+                      ? { label: branchReturnSection, onClick: () => handleSectionChange(branchReturnSection) }
+                      : null,
+                    { label: "Branches", onClick: () => handleSectionChange("Branches") },
+                    { label: selectedBranch.name },
+                  ]
+                : [{ label: activeSection }]
+              )
+                .filter(Boolean)
+                .map((crumb, index, crumbs) => (
+                  <li key={`${crumb.label}-${index}`} className="flex min-w-0 items-center gap-1.5">
+                    {index > 0 ? (
+                      <FontAwesomeIcon icon={faChevronRight} className="text-[10px] text-black/25" aria-hidden="true" />
+                    ) : null}
+                    {crumb.onClick && index < crumbs.length - 1 ? (
+                      <button type="button" onClick={crumb.onClick} className="transition hover:text-black">
+                        {crumb.label}
+                      </button>
+                    ) : (
+                      <span aria-current="page" className="truncate font-medium text-black/70">
+                        {crumb.label}
+                      </span>
+                    )}
+                  </li>
+                ))}
+            </ol>
+          </nav>
         ) : null}
 
         {activeSection === "Dashboard" ? (
@@ -3778,14 +3607,13 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
 
         {activeSection === "Inventory" ? (
           <div className="space-y-4">
-            <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-                <label className="grid gap-2 text-sm font-semibold text-black">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                <label className="grid gap-2 text-sm font-semibold text-black sm:w-52 lg:w-60">
                   Inventory view
                   <select
                     value={inventoryFilter}
                     onChange={(event) => setInventoryFilter(event.target.value)}
-                    className="h-11 w-full rounded-xl sm:min-w-[240px] border border-black/10 bg-white px-3 text-sm font-medium text-black outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                    className="h-11 w-full rounded-xl border border-black/10 bg-white px-3 text-sm font-medium text-black outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                   >
                     <option value="all">All</option>
                     {branches.map((branch) => (
@@ -3796,7 +3624,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                   </select>
                 </label>
 
-                <label className="grid gap-2 text-sm font-semibold text-black">
+                <label className="grid min-w-0 gap-2 text-sm font-semibold text-black sm:max-w-sm sm:flex-1">
                   Search item or ID
                   <span className="relative block">
                     <FontAwesomeIcon
@@ -3808,17 +3636,16 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                       value={inventorySearch}
                       onChange={(event) => setInventorySearch(event.target.value)}
                       placeholder="Item name or ID"
-                      className="h-11 w-full rounded-xl sm:min-w-[240px] border border-black/10 bg-white pl-10 pr-3 text-sm font-medium text-black outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                      className="h-11 w-full rounded-xl border border-black/10 bg-white pl-10 pr-3 text-sm font-medium text-black outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                     />
                   </span>
                 </label>
-              </div>
 
               {inventoryFilter === "all" ? (
                 <button
                   type="button"
                   onClick={handleAddInventoryItem}
-                  className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-brand px-4 text-sm font-semibold text-black transition hover:brightness-95"
+                  className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-brand px-4 sm:ml-auto text-sm font-semibold text-black transition hover:brightness-95"
                 >
                   <FontAwesomeIcon icon={faPlus} />
                   Add item
@@ -3988,6 +3815,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                   </div>
                 </div>
 
+                {branchRecordTab !== "Branch details" ? (
                 <div className="flex flex-wrap items-center gap-3">
                   <label className="grid gap-1 text-xs font-semibold uppercase text-black/45">
                     From
@@ -4012,21 +3840,165 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                     />
                   </label>
                 </div>
+                ) : null}
               </div>
 
               {branchRecordTab === "Branch details" ? (
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                  {[
-                    ["Branch name", selectedBranch.name],
-                    ["Details", selectedBranch.details || "-"],
-                    ["Code for POS", selectedBranch.posCode],
-                    ["Status", selectedBranch.isDisabled ? "Disabled" : "Active"],
-                  ].map(([label, value]) => (
-                    <article key={label} className="rounded-2xl border border-black/8 bg-black/3 p-5">
-                      <p className="text-sm text-black/45">{label}</p>
-                      <p className="mt-2 truncate text-lg font-semibold text-black">{value}</p>
-                    </article>
-                  ))}
+                <div className="space-y-6">
+                  <section className="rounded-[28px] border border-black/8 bg-white shadow-panel">
+                    <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+                      <div className="flex min-w-0 items-center gap-4">
+                        <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-black/8 bg-brand/15 text-2xl text-black sm:h-24 sm:w-24">
+                          {auth.user.businessLogo ? (
+                            <img src={auth.user.businessLogo} alt="Business logo" className="h-full w-full object-cover" />
+                          ) : (
+                            <FontAwesomeIcon icon={faBuilding} />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="truncate text-2xl font-bold text-black">{selectedBranch.name}</h3>
+                          <p className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-black/55">
+                            <span
+                              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                                selectedBranch.isDisabled ? "bg-amber-100 text-amber-800" : "bg-green-100 text-green-800"
+                              }`}
+                            >
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${selectedBranch.isDisabled ? "bg-amber-500" : "bg-green-600"}`}
+                              />
+                              {selectedBranch.isDisabled ? "Disabled" : "Active"}
+                            </span>
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleEditBranch(selectedBranch)}
+                        className="inline-flex h-10 items-center justify-center gap-2 self-start rounded-xl border border-black/10 px-4 text-sm font-semibold text-black transition hover:bg-brand/15 sm:self-auto"
+                      >
+                        <FontAwesomeIcon icon={faPen} />
+                        Edit branch
+                      </button>
+                    </div>
+                  </section>
+
+                  <div className="grid items-start gap-6 xl:grid-cols-2">
+                    <section className="rounded-[28px] border border-black/8 bg-white p-6 shadow-panel">
+                      <div className="mb-5 flex items-center gap-3">
+                        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-black">
+                          <FontAwesomeIcon icon={faBuilding} />
+                        </span>
+                        <div>
+                          <h3 className="text-lg font-semibold text-black">Branch</h3>
+                          <p className="text-sm text-black/50">How this branch signs in to the POS.</p>
+                        </div>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <ProfileField label="Branch Name" icon={faBuilding} value={selectedBranch.name} />
+                        <ProfileField
+                          label="Code for POS"
+                          icon={faKey}
+                          value={
+                            branchCodeVisible ? selectedBranch.posCode : "•".repeat(selectedBranch.posCode?.length || 0)
+                          }
+                          action={
+                            <button
+                              type="button"
+                              onClick={() => setBranchCodeVisible((current) => !current)}
+                              aria-label={branchCodeVisible ? "Hide code for POS" : "Show code for POS"}
+                              title={branchCodeVisible ? "Hide code for POS" : "Show code for POS"}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-black/55 transition hover:bg-brand/15 hover:text-black"
+                            >
+                              <FontAwesomeIcon icon={branchCodeVisible ? faEyeSlash : faEye} />
+                            </button>
+                          }
+                        />
+                        <ProfileField
+                          label="Status"
+                          icon={selectedBranch.isDisabled ? faLock : faCircleCheck}
+                          value={selectedBranch.isDisabled ? "Disabled - POS sign-in is blocked" : "Active"}
+                        />
+                        <ProfileField
+                          label="Added"
+                          icon={faCalendarDays}
+                          value={
+                            selectedBranch.createdAt
+                              ? new Date(selectedBranch.createdAt).toLocaleDateString(undefined, {
+                                  month: "short",
+                                  day: "numeric",
+                                  year: "numeric",
+                                })
+                              : "-"
+                          }
+                        />
+                      </div>
+                    </section>
+
+                    <div className="grid gap-6">
+                      <section className="rounded-[28px] border border-black/8 bg-white p-6 shadow-panel">
+                        <div className="mb-4 flex items-center gap-3">
+                          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-black">
+                            <FontAwesomeIcon icon={faPen} />
+                          </span>
+                          <div>
+                            <h3 className="text-lg font-semibold text-black">Details</h3>
+                            <p className="text-sm text-black/50">Address, contact person, opening hours.</p>
+                          </div>
+                        </div>
+                        <p className="whitespace-pre-line rounded-xl border border-black/10 bg-black/[0.02] px-4 py-3 text-sm leading-6 text-black/75">
+                          {selectedBranch.details || <span className="text-black/40">No details yet.</span>}
+                        </p>
+                      </section>
+
+                      <section className="rounded-[28px] border border-black/8 bg-white p-6 shadow-panel">
+                        <div className="mb-4 flex items-center gap-3">
+                          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand/15 text-black">
+                            <FontAwesomeIcon icon={faBoxesStacked} />
+                          </span>
+                          <div>
+                            <h3 className="text-lg font-semibold text-black">Stock at a glance</h3>
+                            <p className="text-sm text-black/50">Items assigned to this branch.</p>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBranchInventoryLowOnly(false);
+                              setBranchRecordTab("Inventory");
+                            }}
+                            className="rounded-2xl border border-black/8 p-4 text-left transition hover:bg-brand/10"
+                          >
+                            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-black/45">Items</p>
+                            <p className="mt-1 text-2xl font-bold text-black">
+                              {branchInventoryLoading ? "…" : branchInventoryItems.length}
+                            </p>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBranchInventoryLowOnly(true);
+                              setBranchRecordTab("Inventory");
+                            }}
+                            className={`rounded-2xl border p-4 text-left transition ${
+                              branchLowStockItems.length > 0
+                                ? "border-red-200 bg-red-50/60 hover:bg-red-50"
+                                : "border-black/8 hover:bg-brand/10"
+                            }`}
+                          >
+                            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-black/45">Low stock</p>
+                            <p
+                              className={`mt-1 text-2xl font-bold ${
+                                branchLowStockItems.length > 0 ? "text-red-700" : "text-black"
+                              }`}
+                            >
+                              {branchInventoryLoading ? "…" : branchLowStockItems.length}
+                            </p>
+                          </button>
+                        </div>
+                      </section>
+                    </div>
+                  </div>
                 </div>
               ) : null}
 
@@ -4611,7 +4583,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                           disabled={savingForm === "forgot"}
                           className="mr-auto h-10 rounded-xl px-1 text-sm font-semibold text-black/60 underline-offset-4 transition hover:text-black hover:underline disabled:opacity-60"
                         >
-                          {savingForm === "forgot" ? "Sending code..." : "Forgot password?"}
+                          {savingForm === "forgot" ? "Sending link..." : "Forgot password?"}
                         </button>
                         <SaveButton
                           busy={savingForm === "password"}
@@ -4916,6 +4888,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
           </div>
         ) : null}
       </section>
+      </div>
 
       {inventoryModal?.type === "add" || inventoryModal?.type === "edit" ? (
         <InventoryItemModal
@@ -4982,20 +4955,6 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
         />
       ) : null}
 
-      {otpRequest ? (
-        <OtpModal
-          email={otpRequest.email}
-          expiresAt={otpRequest.expiresAt}
-          onResend={requestPasswordOtp}
-          onVerify={handleVerifyOtp}
-          onClose={() => setOtpRequest(null)}
-        />
-      ) : null}
-
-      {revealedPassword ? (
-        <NewPasswordModal password={revealedPassword} onClose={() => setRevealedPassword(null)} />
-      ) : null}
-
       {cropRequest ? (
         <ImageCropModal
           title={`Crop ${imageSettings[cropRequest.kind].label.toLowerCase()}`}
@@ -5051,11 +5010,11 @@ function LoginPage({ onLogin, auth }) {
     <AuthShell
       eyebrow="Secure Login"
       title="Sign in to CowFlo"
-      description="Access your operations dashboard with your owner-approved account."
       footer={
-        <div className="rounded-2xl border border-black/8 bg-black/3 px-4 py-3 text-sm text-black/55">
-          Owner registration is available on a separate route for controlled access.
-        </div>
+        <p className="text-xs text-white/45">
+          <FontAwesomeIcon icon={faShieldHeart} className="mr-1.5 text-brand" />
+          Access your operations dashboard with your owner-approved account.
+        </p>
       }
     >
       <form className="space-y-4" onSubmit={handleSubmit}>
@@ -5072,11 +5031,20 @@ function LoginPage({ onLogin, auth }) {
           placeholder="Password"
           autoComplete="current-password"
         />
-        {message ? <p className="text-sm text-red-600">{message}</p> : null}
+        <div className="-mt-1 flex justify-end">
+          <button
+            type="button"
+            onClick={() => navigate("/forgot-password")}
+            className="text-xs font-semibold text-white/55 transition hover:text-brand"
+          >
+            Forgot password?
+          </button>
+        </div>
+        {message ? <p className="text-sm font-medium text-red-400">{message}</p> : null}
         <button
           type="submit"
           disabled={loading}
-          className="inline-flex w-full items-center justify-center gap-3 rounded-2xl bg-brand px-5 py-4 text-sm font-semibold text-black transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-70"
+          className="inline-flex w-full items-center justify-center gap-3 rounded-xl bg-brand px-5 py-4 text-sm font-bold text-black shadow-lg shadow-brand/20 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
         >
           {loading ? "Signing in..." : "Sign in"}
           <FontAwesomeIcon icon={faArrowRight} />
@@ -5135,15 +5103,16 @@ function SignupPage({ onLogin, auth }) {
 
   return (
     <AuthShell
+      wide
       eyebrow="Owner Signup"
       title="Create your private CowFlo account"
-      description="This page is separated from the public login and protected with an owner access key."
       footer={
         <button
           type="button"
           onClick={() => navigate("/login")}
-          className="text-sm font-medium text-black/55 transition hover:text-black"
+          className="inline-flex items-center gap-2 text-sm font-semibold text-white/55 transition hover:text-brand"
         >
+          <FontAwesomeIcon icon={faArrowLeft} />
           Back to login
         </button>
       }
@@ -5187,8 +5156,8 @@ function SignupPage({ onLogin, auth }) {
           placeholder="Business Name"
           autoComplete="organization"
         />
-        <label className="group flex items-center gap-3 rounded-2xl border border-black/10 bg-white px-4 py-4 transition focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/20">
-          <span className="text-black/45 transition group-focus-within:text-brand">
+        <label className={authFieldClass}>
+          <span className="text-white/45 transition group-focus-within:text-brand">
             <FontAwesomeIcon icon={faKey} />
           </span>
           <input
@@ -5196,10 +5165,10 @@ function SignupPage({ onLogin, auth }) {
             onChange={(event) => setForm((current) => ({ ...current, businessCode: event.target.value }))}
             placeholder="Business Code (only to join an existing business)"
             autoComplete="off"
-            className="w-full border-0 bg-transparent text-sm uppercase text-black outline-none placeholder:normal-case placeholder:text-black/35"
+            className="w-full border-0 bg-transparent text-sm uppercase text-white outline-none placeholder:normal-case placeholder:text-white/40"
           />
         </label>
-        <p className="-mt-2 px-1 text-xs text-black/50">
+        <p className="-mt-2 px-1 text-xs text-white/45">
           {form.businessCode.trim()
             ? "You will join this business. The owner decides what you can see."
             : "Leave Business Code empty to create a new business."}
@@ -5238,16 +5207,196 @@ function SignupPage({ onLogin, auth }) {
           placeholder="cow_flow_sign_up_pass"
           autoComplete="one-time-code"
         />
-        {message ? <p className="text-sm text-red-600">{message}</p> : null}
+        {message ? <p className="text-sm font-medium text-red-400">{message}</p> : null}
         <button
           type="submit"
           disabled={loading}
-          className="inline-flex w-full items-center justify-center gap-3 rounded-2xl bg-brand px-5 py-4 text-sm font-semibold text-black transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-70"
+          className="inline-flex w-full items-center justify-center gap-3 rounded-xl bg-brand px-5 py-4 text-sm font-bold text-black shadow-lg shadow-brand/20 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
         >
           {loading ? "Creating account..." : form.businessCode.trim() ? "Join business" : "Create account"}
           <FontAwesomeIcon icon={faArrowRight} />
         </button>
       </form>
+    </AuthShell>
+  );
+}
+
+const authSubmitClass =
+  "inline-flex w-full items-center justify-center gap-3 rounded-xl bg-brand px-5 py-4 text-sm font-bold text-black shadow-lg shadow-brand/20 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70";
+
+function BackToLoginButton() {
+  const navigate = useNavigate();
+
+  return (
+    <button
+      type="button"
+      onClick={() => navigate("/login")}
+      className="inline-flex items-center gap-2 text-sm font-semibold text-white/55 transition hover:text-brand"
+    >
+      <FontAwesomeIcon icon={faArrowLeft} />
+      Back to login
+    </button>
+  );
+}
+
+function ForgotPasswordPage() {
+  const [identifier, setIdentifier] = useState("");
+  const [message, setMessage] = useState("");
+  const [sentMessage, setSentMessage] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setLoading(true);
+    setMessage("");
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/password-reset/request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.message || "Unable to send the reset link.");
+      }
+
+      setSentMessage(payload.message);
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <AuthShell
+      eyebrow="Forgot password"
+      title="Reset your password"
+      description="Enter your email or username and we will email you a link to set a new password."
+      footer={<BackToLoginButton />}
+    >
+      {sentMessage ? (
+        <div className="rounded-xl border border-brand/30 bg-brand/10 px-4 py-4 text-center text-sm text-white/80">
+          <FontAwesomeIcon icon={faEnvelope} className="mb-2 text-2xl text-brand" />
+          <p>{sentMessage}</p>
+          <p className="mt-1 text-white/50">The link expires in 30 minutes.</p>
+        </div>
+      ) : (
+        <form className="space-y-4" onSubmit={handleSubmit}>
+          <InputField
+            icon={faEnvelope}
+            value={identifier}
+            onChange={(event) => setIdentifier(event.target.value)}
+            placeholder="Email or username"
+            autoComplete="username"
+          />
+          {message ? <p className="text-sm font-medium text-red-400">{message}</p> : null}
+          <button type="submit" disabled={loading} className={authSubmitClass}>
+            {loading ? "Sending link..." : "Send reset link"}
+            <FontAwesomeIcon icon={faArrowRight} />
+          </button>
+        </form>
+      )}
+    </AuthShell>
+  );
+}
+
+function ResetPasswordPage() {
+  const navigate = useNavigate();
+  const token = new URLSearchParams(window.location.search).get("token") || "";
+  const [linkState, setLinkState] = useState({ checking: true, email: "", error: "" });
+  const [form, setForm] = useState({ password: "", confirmPassword: "" });
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    fetch(`${apiBaseUrl}/auth/password-reset/verify?token=${encodeURIComponent(token)}`)
+      .then(async (response) => {
+        const payload = await response.json();
+
+        setLinkState(
+          response.ok
+            ? { checking: false, email: payload.email, error: "" }
+            : { checking: false, email: "", error: payload.message || "This reset link is invalid." },
+        );
+      })
+      .catch(() => setLinkState({ checking: false, email: "", error: "Unable to check the reset link." }));
+  }, [token]);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setMessage("");
+
+    if (form.password !== form.confirmPassword) {
+      setMessage("Passwords do not match.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/password-reset/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, ...form }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.message || "Unable to change the password.");
+      }
+
+      await Swal.fire("Password changed", payload.message, "success");
+      navigate("/login", { replace: true });
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <AuthShell
+      eyebrow="New password"
+      title="Set a new password"
+      description={linkState.email ? `For ${linkState.email}. Use at least 8 characters.` : "Use at least 8 characters."}
+      footer={<BackToLoginButton />}
+    >
+      {linkState.checking ? (
+        <p className="text-center text-sm text-white/55">Checking your link...</p>
+      ) : linkState.error ? (
+        <div className="space-y-4 text-center">
+          <p className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+            {linkState.error}
+          </p>
+          <button type="button" onClick={() => navigate("/forgot-password")} className={authSubmitClass}>
+            Ask for a new link
+            <FontAwesomeIcon icon={faArrowRight} />
+          </button>
+        </div>
+      ) : (
+        <form className="space-y-4" onSubmit={handleSubmit}>
+          <PasswordField
+            value={form.password}
+            onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
+            placeholder="New password"
+            autoComplete="new-password"
+          />
+          <PasswordField
+            value={form.confirmPassword}
+            onChange={(event) => setForm((current) => ({ ...current, confirmPassword: event.target.value }))}
+            placeholder="Confirm new password"
+            autoComplete="new-password"
+          />
+          {message ? <p className="text-sm font-medium text-red-400">{message}</p> : null}
+          <button type="submit" disabled={loading} className={authSubmitClass}>
+            {loading ? "Saving..." : "Save new password"}
+            <FontAwesomeIcon icon={faArrowRight} />
+          </button>
+        </form>
+      )}
     </AuthShell>
   );
 }
@@ -5296,6 +5445,8 @@ export default function App() {
         <Route path="/" element={<Navigate to={auth ? "/app" : "/login"} replace />} />
         <Route path="/login" element={<LoginPage auth={auth} onLogin={setAuth} />} />
         <Route path="/signup" element={<SignupPage auth={auth} onLogin={setAuth} />} />
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route
           path="/app"
           element={
