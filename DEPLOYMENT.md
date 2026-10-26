@@ -256,10 +256,12 @@ The websites need to know your backend URL **at build time**. It's baked into th
    > Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
    > ```
    > Or type `npm.cmd` instead of `npm` in the commands below.
-2. Set the backend URL (replace with **your** Backend URL — keep the `/api` at the end, no trailing slash):
-   ```powershell
-   $env:VITE_API_BASE_URL = "https://cowflo-api.onrender.com/api"
+2. The backend URL is saved in `frontend\.env.production` and `cowflow_pos\.env.production`, which `npm run build` reads automatically:
    ```
+   VITE_API_BASE_URL=https://cowflo-api.onrender.com/api
+   ```
+   Only edit these two files if your Render URL changes (keep the `/api` at the end, no trailing slash).
+   If this is missing, the site calls `http://<your-site>:4000/api` and the browser blocks it with a **Mixed Content** error.
 3. Build the login site:
    ```powershell
    cd frontend
