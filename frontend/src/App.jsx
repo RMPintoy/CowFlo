@@ -4079,39 +4079,6 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                   sub={`items at ${dashboardData?.lowStockThreshold ?? 3} or below in a branch`}
                 />
               </div>
-
-              {dashboardData?.overall.lowStockItems.length ? (
-                <div className="rounded-[24px] border border-amber-200 bg-amber-50/60 p-5">
-                  <div className="mb-3 flex items-center gap-2 text-amber-800">
-                    <FontAwesomeIcon icon={faTriangleExclamation} />
-                    <h3 className="text-sm font-semibold">Needs restocking</h3>
-                  </div>
-                  <ul className="divide-y divide-amber-200/70">
-                    {dashboardData.overall.lowStockItems.slice(0, 8).map((item) => (
-                      <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
-                        <span className="min-w-0 truncate text-sm font-medium text-black">{item.name}</span>
-                        <span className="flex flex-wrap justify-end gap-1.5">
-                          {(item.branches ?? []).map((branch) => (
-                            <span
-                              key={branch.id}
-                              className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
-                                branch.stocks <= 0 ? "bg-red-100 text-red-700" : "bg-white text-amber-800 ring-1 ring-amber-200"
-                              }`}
-                            >
-                              {branch.name}: {branch.stocks <= 0 ? "out of stock" : `${branch.stocks} left`}
-                            </span>
-                          ))}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                  {dashboardData.overall.lowStockItems.length > 8 ? (
-                    <p className="mt-2 text-xs text-amber-800/80">
-                      and {dashboardData.overall.lowStockItems.length - 8} more. See Inventory for the full list.
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
             </section>
 
             <section className={`space-y-4 transition ${dashboardLoading && dashboardData ? "opacity-60" : ""}`}>
