@@ -3,9 +3,11 @@ import bcrypt from "bcryptjs";
 import cors from "cors";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import express from "express";
+import { createServer } from "node:http";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
 import { ensureSchema, generateBusinessIdCode, pool } from "./db.js";
+import { attachRealtime, liveUpdates } from "./realtime.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -46,10 +48,14 @@ function isPrivateNetworkOrigin(origin) {
   }
 }
 
+function isOriginAllowed(origin) {
+  return allowedCorsOrigins.has(origin) || isPrivateNetworkOrigin(origin);
+}
+
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedCorsOrigins.has(origin) || isPrivateNetworkOrigin(origin)) {
+      if (!origin || isOriginAllowed(origin)) {
         callback(null, true);
         return;
       }
@@ -59,6 +65,7 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "10mb" }));
+app.use(liveUpdates);
 
 function createToken(user) {
   const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ") || user.name;
@@ -876,6 +883,7 @@ app.post("/api/auth/signup", async (req, res) => {
     const user = result.rows[0];
     const token = createToken(user);
 
+    res.locals.liveBusinessId = user.business_id;
     return res.status(201).json({ token, user: serializeUser(user) });
   } catch (error) {
     await client.query("ROLLBACK");
@@ -2733,15 +2741,8 @@ app.post("/api/inventory/:id/stock", authenticate, requireAccess((a, req) => a.p
         [itemId, uniqueBranchIds, assignedStocks],
       );
 
-      await client.query(
-        `
-          DELETE FROM inventory_item_branches
-          WHERE inventory_item_id = $1
-            AND branch_id = ANY($2::int[])
-            AND assigned_stocks <= 0
-        `,
-        [itemId, uniqueBranchIds],
-      );
+      // A branch emptied by "Remove stock" keeps its row at 0, the same as one sold out at the POS,
+      // so the item still shows as out of stock (dashboard low stock, branch inventory) and can be restocked.
 
       await client.query(
         `
@@ -3348,7 +3349,7 @@ app.get("/api/dashboard", authenticate, requireAccess(section("dashboard")), asy
       [businessId],
     );
     const lowStockThreshold = Number(businessResult.rows[0]?.low_stock_threshold ?? 3);
-    const [branchesResult, salesByBranch, overallLowStock, branchLowStock] = await Promise.all([
+    const [branchesResult, salesByBranch, branchLowStock] = await Promise.all([
       pool.query(
         `
           SELECT id, name, is_disabled
@@ -3361,19 +3362,12 @@ app.get("/api/dashboard", authenticate, requireAccess(section("dashboard")), asy
       querySalesTotalsByBranch(businessId, req.query),
       pool.query(
         `
-          SELECT id, name, stocks
-          FROM inventory_items
-          WHERE business_id = $1 AND stocks <= $2
-          ORDER BY stocks ASC, sort_order ASC, id ASC
-        `,
-        [businessId, lowStockThreshold],
-      ),
-      pool.query(
-        `
-          SELECT inventory_item_branches.branch_id, inventory_items.id, inventory_items.name,
+          SELECT inventory_item_branches.branch_id, branches.name AS branch_name,
+            inventory_items.id, inventory_items.name,
             inventory_item_branches.assigned_stocks AS stocks
           FROM inventory_item_branches
           JOIN inventory_items ON inventory_items.id = inventory_item_branches.inventory_item_id
+          JOIN branches ON branches.id = inventory_item_branches.branch_id
           WHERE inventory_items.business_id = $1 AND inventory_item_branches.assigned_stocks <= $2
           ORDER BY inventory_item_branches.assigned_stocks ASC, inventory_items.sort_order ASC, inventory_items.id ASC
         `,
@@ -3385,10 +3379,19 @@ app.get("/api/dashboard", authenticate, requireAccess(section("dashboard")), asy
     const overallTotals = {};
     const visibleBranches = branchesResult.rows.filter((branch) => canAccessBranch(req.access, branch.id));
     const visibleBranchLowStock = branchLowStock.rows.filter((row) => canAccessBranch(req.access, row.branch_id));
-    // Someone limited to some branches only sees low stock in those branches.
-    const overallLowStockItems = hasAllBranches(req.access)
-      ? overallLowStock.rows
-      : [...new Map(visibleBranchLowStock.map((row) => [row.id, row])).values()];
+    // Stock is held per branch (the POS sells from its own branch), so an item is low when it is
+    // low in any branch, even if other branches still have plenty. Each item is listed once with
+    // the branches where it is low; `stocks` is its lowest branch count. Rows arrive lowest-first.
+    const overallLowStockById = new Map();
+
+    visibleBranchLowStock.forEach((row) => {
+      const entry = overallLowStockById.get(row.id) ?? { ...serializeLowStock(row), branches: [] };
+
+      entry.branches.push({ id: row.branch_id, name: row.branch_name, stocks: Number(row.stocks) });
+      overallLowStockById.set(row.id, entry);
+    });
+
+    const overallLowStockItems = [...overallLowStockById.values()];
 
     for (const [branchId, totals] of salesByBranch.entries()) {
       if (!canAccessBranch(req.access, branchId)) {
@@ -3409,7 +3412,7 @@ app.get("/api/dashboard", authenticate, requireAccess(section("dashboard")), asy
       lowStockThreshold,
       overall: {
         ...finishSalesTotals(overallTotals),
-        lowStockItems: overallLowStockItems.map(serializeLowStock),
+        lowStockItems: overallLowStockItems,
       },
       branches: visibleBranches.map((branch) => ({
         id: branch.id,
@@ -3977,8 +3980,14 @@ app.post("/api/pos/checkout", authenticatePos, async (req, res) => {
 async function start() {
   try {
     await ensureSchema();
-    app.listen(port, () => {
-      console.log(`CowFlo API listening on port ${port}`);
+
+    // One HTTP server carries both the REST API and the WebSocket (Socket.IO) connections,
+    // so a single free Render web service handles everything.
+    const httpServer = createServer(app);
+
+    attachRealtime(httpServer, { jwtSecret, isOriginAllowed });
+    httpServer.listen(port, () => {
+      console.log(`CowFlo API listening on port ${port} (REST + realtime)`);
     });
   } catch (error) {
     console.error("Failed to start server", error);

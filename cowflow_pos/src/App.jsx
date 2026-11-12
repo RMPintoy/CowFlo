@@ -1,6 +1,7 @@
 import React, { Component, useEffect, useMemo, useState } from "react";
 import Swal from "sweetalert2";
 import "sweetalert2/dist/sweetalert2.min.css";
+import { getRealtimeUrl, useLiveUpdates } from "./live.js";
 
 function resolveApiBaseUrl() {
   if (import.meta.env.VITE_API_BASE_URL) {
@@ -661,6 +662,48 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
     return () => window.clearInterval(timer);
   }, []);
 
+  // Real-time: the backend pings this POS whenever the owner or another terminal changes data.
+  const [liveTicks, setLiveTicks] = useState({});
+  const liveConnected = useLiveUpdates(getRealtimeUrl(apiBaseUrl), auth.token, (topics) => {
+    setLiveTicks((current) => {
+      const next = { ...current };
+      topics.forEach((topic) => {
+        next[topic] = (next[topic] || 0) + 1;
+      });
+      return next;
+    });
+  });
+  const itemsTick = (liveTicks.inventory || 0) + (liveTicks.skus || 0);
+  const salesTick = liveTicks.sales || 0;
+  const sessionTick = (liveTicks.session || 0) + (liveTicks.business || 0);
+
+  useEffect(() => {
+    if (itemsTick) {
+      loadItems(page, { quiet: true });
+    }
+  }, [itemsTick]);
+
+  useEffect(() => {
+    if (!salesTick || activeTab !== "Sales") {
+      return;
+    }
+
+    if (salesSection === "receipts") {
+      loadSales(salesPage, { quiet: true });
+    } else {
+      loadRefunds(refundPage, { quiet: true });
+    }
+  }, [salesTick]);
+
+  // Branch disabled/deleted, or business renamed: re-check the session (signs out if it ended).
+  useEffect(() => {
+    if (sessionTick) {
+      requestPos("/pos/session")
+        .then((payload) => onSessionUpdate?.(payload.session))
+        .catch(() => {});
+    }
+  }, [sessionTick]);
+
   async function requestPos(path, options = {}) {
     const response = await fetch(`${apiBaseUrl}${path}`, {
       ...options,
@@ -682,7 +725,27 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
     return payload;
   }
 
-  async function loadItems(nextPage = page) {
+  // Keep cart lines in step with fresh prices and stock (e.g. the owner changed a price,
+  // or another terminal sold the last units).
+  function syncCart(freshItems) {
+    const freshById = new Map(freshItems.map((item) => [item.id, item]));
+
+    setCart((current) =>
+      current
+        .map((entry) => {
+          const fresh = freshById.get(entry.id);
+
+          if (!fresh) {
+            return entry;
+          }
+
+          return { ...entry, ...fresh, quantity: Math.min(entry.quantity, Math.max(fresh.stockLeft, 0)) };
+        })
+        .filter((entry) => entry.quantity > 0),
+    );
+  }
+
+  async function loadItems(nextPage = page, { quiet = false } = {}) {
     setMessage("");
 
     const params = new URLSearchParams({
@@ -700,19 +763,23 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
       setPage(payload.page);
       setTotalPages(payload.totalPages);
     };
-    const cached = readPosCache(path);
+    // A live refresh keeps the current list on screen until the fresh one arrives.
+    const cached = quiet ? null : readPosCache(path);
 
     if (cached) {
       showItems(cached);
     }
 
-    setLoadingItems(!cached);
+    if (!quiet) {
+      setLoadingItems(!cached);
+    }
 
     try {
       const payload = await requestPos(path);
 
       writePosCache(path, payload);
       showItems(payload);
+      syncCart(payload.items);
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -724,8 +791,8 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
     loadItems(1);
   }, [search]);
 
-  async function loadSales(nextPage = salesPage) {
-    setSalesLoading(true);
+  async function loadSales(nextPage = salesPage, { quiet = false } = {}) {
+    setSalesLoading(!quiet);
     setSalesMessage("");
 
     try {
@@ -753,8 +820,8 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
     }
   }
 
-  async function loadRefunds(nextPage = refundPage) {
-    setRefundsLoading(true);
+  async function loadRefunds(nextPage = refundPage, { quiet = false } = {}) {
+    setRefundsLoading(!quiet);
 
     try {
       const params = new URLSearchParams({
@@ -1162,7 +1229,13 @@ function DashboardPage({ auth, onLogout, onSessionUpdate }) {
           </span>
           <div className="pos-brand-text">
             <strong>{businessName}</strong>
-            <span>{branchName}</span>
+            <span>
+              <i
+                className={`live-dot${liveConnected ? " on" : ""}`}
+                title={liveConnected ? "Live: updates appear instantly" : "Reconnecting to live updates…"}
+              />
+              {branchName}
+            </span>
           </div>
         </div>
         <nav>

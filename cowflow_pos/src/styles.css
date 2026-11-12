@@ -1679,3 +1679,19 @@ button:disabled {
     padding: 16px;
   }
 }
+
+/* Live (WebSocket) connection indicator beside the branch name. */
+.live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: #b5b5b5;
+  vertical-align: 1px;
+}
+
+.live-dot.on {
+  background: #63e050;
+  box-shadow: 0 0 0 3px rgba(99, 224, 80, 0.25);
+}

@@ -48,6 +48,7 @@ import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import Swal from "sweetalert2";
 import "sweetalert2/dist/sweetalert2.min.css";
 import cowfloLogo from "./assets/cowflo-logo.png";
+import { getRealtimeUrl, useLiveUpdates } from "./live.js";
 
 const apiBaseUrl =
   import.meta.env.VITE_API_BASE_URL ||
@@ -627,18 +628,19 @@ function ToggleRow({ label, description, checked, onChange, disabled }) {
   );
 }
 
-function AccountsManager({ requestApi, branches }) {
+function AccountsManager({ requestApi, branches, liveTick = 0 }) {
   const [accounts, setAccounts] = useState(null);
   const [message, setMessage] = useState("");
   const [openId, setOpenId] = useState(null);
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
 
+  // liveTick changes when accounts change elsewhere (new member joined, access edited in another tab).
   useEffect(() => {
     requestApi("/accounts")
       .then((payload) => setAccounts(payload.accounts))
       .catch((error) => setMessage(error.message));
-  }, []);
+  }, [liveTick]);
 
   function openEditor(account) {
     if (openId === account.id) {
@@ -890,7 +892,7 @@ const skuInputClass =
 const skuActionClass =
   "inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition disabled:opacity-40";
 
-function SkuManager({ requestApi, branches }) {
+function SkuManager({ requestApi, branches, liveTick = 0 }) {
   const [skus, setSkus] = useState(null);
   const [message, setMessage] = useState("");
   const [skuDraft, setSkuDraft] = useState(null);
@@ -900,11 +902,12 @@ function SkuManager({ requestApi, branches }) {
   const [categoryDraft, setCategoryDraft] = useState(null);
   const [busy, setBusy] = useState(null);
 
+  // liveTick changes when SKUs or categories change elsewhere.
   useEffect(() => {
     requestApi("/skus")
       .then((payload) => setSkus(payload.skus))
       .catch((error) => setMessage(error.message));
-  }, []);
+  }, [liveTick]);
 
   function replaceSku(sku) {
     setSkus((current) => current.map((item) => (item.id === sku.id ? sku : item)));
@@ -2994,11 +2997,35 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
     setBranchInventoryPage(1);
   }, [selectedBranch?.id, branchInventoryLowOnly]);
 
+  // Real-time: the backend pings this screen whenever anyone in the business (another admin,
+  // or a POS terminal) changes data. Each tick below makes the matching view re-fetch quietly.
+  const [liveTicks, setLiveTicks] = useState({});
+  const quietReloadRef = useRef(false);
+  const liveConnected = useLiveUpdates(getRealtimeUrl(apiBaseUrl), auth.token, (topics) => {
+    quietReloadRef.current = true;
+    setLiveTicks((current) => {
+      const next = { ...current };
+      topics.forEach((topic) => {
+        next[topic] = (next[topic] || 0) + 1;
+      });
+      return next;
+    });
+  });
+  const tick = (...topics) => topics.reduce((sum, topic) => sum + (liveTicks[topic] || 0), 0);
+  const inventoryTick = tick("inventory", "sales");
+  const salesTick = tick("sales");
+  const dashboardTick = tick("inventory", "sales", "branches");
+  const branchesTick = tick("branches");
+  const skusTick = tick("skus");
+  const accountsTick = tick("accounts", "branches");
+  const meTick = tick("accounts", "business");
+
+  // Re-reading /me also applies permission changes live: menus and sections follow the new access.
   useEffect(() => {
     requestBranchApi("/me")
       .then((payload) => onUserUpdate(payload.user))
       .catch(() => {});
-  }, []);
+  }, [meTick]);
 
   const imageSettings = {
     profile: { endpoint: "/me/profile-image", label: "Profile picture", width: 400, height: 400 },
@@ -3243,9 +3270,17 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
     if (["Branches", "Inventory", "Profile", "Settings"].includes(activeSection)) {
       loadBranches();
     }
-  }, [activeSection]);
+  }, [activeSection, branchesTick]);
 
-  async function loadInventory() {
+  // Keep the open branch's details (name, POS code, status) in step with the fresh branch list.
+  useEffect(() => {
+    setSelectedBranch((current) => {
+      const fresh = current && branches.find((branch) => branch.id === current.id);
+      return fresh && fresh !== current ? fresh : current;
+    });
+  }, [branches]);
+
+  async function loadInventory({ quiet = false } = {}) {
     setInventoryMessage("");
 
     try {
@@ -3261,7 +3296,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
         setInventoryItems(payload.inventoryItems),
       );
 
-      setInventoryLoading(!hadCache);
+      setInventoryLoading(!hadCache && !quiet);
       await request;
     } catch (error) {
       setInventoryMessage(error.message);
@@ -3272,19 +3307,19 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
 
   useEffect(() => {
     if (activeSection === "Inventory") {
-      loadInventory();
+      loadInventory({ quiet: quietReloadRef.current });
     }
-  }, [activeSection, inventoryFilter, inventorySearch]);
+  }, [activeSection, inventoryFilter, inventorySearch, inventoryTick]);
 
   // SKUs feed the inventory item form; Settings > Business manages them.
   useEffect(() => {
     if (activeSection === "Inventory") {
       loadCachedApi("/skus", (payload) => setSkus(payload.skus), (error) => setInventoryMessage(error.message));
     }
-  }, [activeSection]);
+  }, [activeSection, skusTick]);
 
-  async function loadBranchInventory(branchId) {
-    setBranchInventoryLoading(true);
+  async function loadBranchInventory(branchId, { quiet = false } = {}) {
+    setBranchInventoryLoading(!quiet);
     setBranchInventoryMessage("");
 
     try {
@@ -3313,8 +3348,9 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
     }
 
     let cancelled = false;
+    const quiet = quietReloadRef.current;
     const timer = window.setTimeout(async () => {
-      setBranchSalesLoading(true);
+      setBranchSalesLoading(!quiet);
       setBranchSalesMessage("");
 
       try {
@@ -3356,6 +3392,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
     branchSalesPage,
     branchSalesSearch.receipt,
     branchSalesSearch.item,
+    salesTick,
   ]);
 
   useEffect(() => {
@@ -3365,7 +3402,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
 
     let cancelled = false;
 
-    setDashboardLoading(true);
+    setDashboardLoading(!quietReloadRef.current);
     setDashboardMessage("");
 
     const params = new URLSearchParams({
@@ -3395,7 +3432,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
     return () => {
       cancelled = true;
     };
-  }, [activeSection, dashboardRange.from, dashboardRange.to]);
+  }, [activeSection, dashboardRange.from, dashboardRange.to, dashboardTick]);
 
   function handleOpenBranchSales(branch) {
     setActiveSection("Branches");
@@ -3419,9 +3456,15 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
 
   useEffect(() => {
     if (activeSection === "Branches" && selectedBranch) {
-      loadBranchInventory(selectedBranch.id);
+      loadBranchInventory(selectedBranch.id, { quiet: quietReloadRef.current });
     }
-  }, [activeSection, selectedBranch?.id, branchDateRange.from, branchDateRange.to]);
+  }, [activeSection, selectedBranch?.id, branchDateRange.from, branchDateRange.to, inventoryTick]);
+
+  // Runs after the data effects above in the same render: a live reload is quiet only for the
+  // render it triggered, so the user's own navigation still shows loading states.
+  useEffect(() => {
+    quietReloadRef.current = false;
+  });
 
   useEffect(() => {
     if (isDesktop) {
@@ -3847,7 +3890,12 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                     getInitials(auth.user.name)
                   )}
                 </span>
-                <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white bg-brand" />
+                <span
+                  title={liveConnected ? "Live: updates appear instantly" : "Reconnecting to live updates…"}
+                  className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white ${
+                    liveConnected ? "bg-brand" : "bg-gray-400"
+                  }`}
+                />
               </span>
               <span className="hidden min-w-0 text-left sm:block">
                 <span className="block max-w-[160px] truncate text-sm font-semibold leading-tight text-black">
@@ -4028,10 +4076,42 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                   icon={faTriangleExclamation}
                   label="Low stock"
                   value={(dashboardData?.overall.lowStockItems.length ?? 0).toLocaleString()}
-                  sub={`items at ${dashboardData?.lowStockThreshold ?? 3} or below`}
+                  sub={`items at ${dashboardData?.lowStockThreshold ?? 3} or below in a branch`}
                 />
               </div>
 
+              {dashboardData?.overall.lowStockItems.length ? (
+                <div className="rounded-[24px] border border-amber-200 bg-amber-50/60 p-5">
+                  <div className="mb-3 flex items-center gap-2 text-amber-800">
+                    <FontAwesomeIcon icon={faTriangleExclamation} />
+                    <h3 className="text-sm font-semibold">Needs restocking</h3>
+                  </div>
+                  <ul className="divide-y divide-amber-200/70">
+                    {dashboardData.overall.lowStockItems.slice(0, 8).map((item) => (
+                      <li key={item.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                        <span className="min-w-0 truncate text-sm font-medium text-black">{item.name}</span>
+                        <span className="flex flex-wrap justify-end gap-1.5">
+                          {(item.branches ?? []).map((branch) => (
+                            <span
+                              key={branch.id}
+                              className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                                branch.stocks <= 0 ? "bg-red-100 text-red-700" : "bg-white text-amber-800 ring-1 ring-amber-200"
+                              }`}
+                            >
+                              {branch.name}: {branch.stocks <= 0 ? "out of stock" : `${branch.stocks} left`}
+                            </span>
+                          ))}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  {dashboardData.overall.lowStockItems.length > 8 ? (
+                    <p className="mt-2 text-xs text-amber-800/80">
+                      and {dashboardData.overall.lowStockItems.length - 8} more. See Inventory for the full list.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </section>
 
             <section className={`space-y-4 transition ${dashboardLoading && dashboardData ? "opacity-60" : ""}`}>
@@ -5426,7 +5506,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
                   </SettingsCard>
                 </form>
 
-                <SkuManager requestApi={requestBranchApi} branches={branches} />
+                <SkuManager requestApi={requestBranchApi} branches={branches} liveTick={skusTick} />
 
                 <SettingsCard
                   icon={faShieldHeart}
@@ -5546,7 +5626,7 @@ function Dashboard({ auth, onLogout, onUserUpdate }) {
             ) : null}
 
             {settingsTab === "Accounts" ? (
-              <AccountsManager requestApi={requestBranchApi} branches={branches} />
+              <AccountsManager requestApi={requestBranchApi} branches={branches} liveTick={accountsTick} />
             ) : null}
           </div>
         ) : null}
